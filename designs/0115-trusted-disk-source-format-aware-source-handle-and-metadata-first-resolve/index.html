@@ -1,0 +1,3133 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0115-trusted-disk-source-format-aware-source-handle-and-metadata-first-resolve/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Trusted Mounted Source Artifact Attestation And Format-Aware Resolve - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Trusted Mounted Source Artifact Attestation And Format-Aware Resolve
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p><code>ResolvePublicDiskSource</code> should stop behaving like a partial import path and
+should stop returning a public source-handle-shaped object whose semantics
+depend on whether <code>artifact_id</code> happened to be known.</p>
+<p>The long-term contract should instead be:</p>
+<ul>
+<li>mounted trusted disk sources are attested into a daemon-session-local artifact
+  profile,</li>
+<li>successful mounted resolve always mints <code>msa1:</code> as the <strong>primary</strong> public
+  artifact id,</li>
+<li><code>mi2:</code> remains the only content-verified identity and is formed only by
+  explicit verification, import, or seal,</li>
+<li>and any already-known <code>mi2:</code> from a trusted descriptor is surfaced as an
+  optional content hint rather than replacing the mounted artifact's primary
+  identity.</li>
+<li>optimistic binding-native serving may use an <code>msa1:</code>-backed local-ready
+  serving value before <code>mi2:</code> promotion, but that local-ready value is
+  same-daemon, session-local, and not a canonical publication identity.</li>
+</ul>
+<p>This is the correct long-term optimization boundary:</p>
+<ul>
+<li>default mounted resolve is lightweight and does not hash payload bytes,</li>
+<li>binding-native serving can remain artifact-first without inventing <code>disksrc:</code>
+  or a parallel source-handle plane,</li>
+<li>and the repository keeps one artifact-centric model while preserving strict
+  consistency and explicit authority boundaries.</li>
+</ul>
+<p>The key correction is therefore not "sometimes return <code>mi2:</code> faster."</p>
+<p>The key correction is:</p>
+<ul>
+<li>keep mounted resolve lightweight by default,</li>
+<li>keep mounted resolve artifact-first through <code>msa1:</code>,</li>
+<li>keep source freshness and source authority explicit through mounted snapshot
+  validation,</li>
+<li>allow local-ready serving to proceed on trusted <code>msa1:</code> evidence when a
+  binding-native family has been admitted for optimistic startup,</li>
+<li>and keep canonical, durable, or cross-daemon content truth explicit through
+  later <code>mi2:</code> promotion rather than by overloading the resolve path.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["Mounted disk path"] --&gt; B["Normalize path + match policy"]
+  B --&gt; C["Build shared mounted-source metadata"]
+  C --&gt; D["Mint primary artifact_id = msa1:..."]
+  C --&gt; E{"Trusted descriptor&lt;br&gt;valid mi2"}
+  E -- yes --&gt; F["Attach trusted_content_artifact_id = mi2:..."]
+  E -- no --&gt; G["No mi2 hint required"]
+  D --&gt; H["Register session-local snapshot state"]
+  F --&gt; H
+  G --&gt; H
+  H --&gt; I["ArtifactSelection / Binding / Materialize"]
+  I --&gt; J["Revalidate snapshot before read"]
+  J --&gt; K{"Optimistic local serving&lt;br&gt;policy admitted?"}
+  K -- yes --&gt; L["Freeze local serving value&lt;br&gt;verification_state=pending"]
+  K -- no --&gt; M["Explicit verify / import / seal"]
+  L --&gt; M
+  M --&gt; N["Canonical/durable identity = mi2:..."]</code></pre>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Make trusted mounted sources first-class artifact subjects instead of a
+  special public source-handle contract.</li>
+<li>Keep the default mounted-source identity lightweight:</li>
+<li>successful mounted resolve returns <code>msa1:</code>,</li>
+<li>and default cold-path resolve does not hash payload bytes.</li>
+<li>Support existing on-disk formats explicitly and deterministically:</li>
+<li>partitioned <code>tensor.data</code> / <code>tensor.data_N</code></li>
+<li><code>*.safetensors</code></li>
+<li>Remove <code>disksrc:</code> and any future artifact-shaped local-source fallback ids.</li>
+<li>Keep <code>mi2:</code> strict and unchanged as the only content-verified identity.</li>
+<li>Introduce a lightweight mounted-source artifact identity family (<code>msa1:</code>)
+  with narrower guarantees than <code>mi2:</code> but stronger semantics than a bare local
+  path or public handle.</li>
+<li>Keep mounted-source profile, authority, and validation semantics explicit.</li>
+<li>Make snapshot revalidation a hard invariant so mounted bytes cannot silently
+  drift underneath an artifact id.</li>
+<li>Permit a separately configured optimistic local-ready serving mode where an
+  admitted same-daemon binding-native flow may serve from frozen realized bytes
+  while <code>msa1 -&gt; mi2</code> promotion runs asynchronously.</li>
+<li>Keep trust and policy in typed daemon config under <code>0004</code>.</li>
+<li>Reuse the repository's existing profile/authority split from <code>0092</code> rather
+  than introducing a second long-term object model.</li>
+<li>Introduce one shared core metadata seam for mounted-source resolve, import,
+  hashing, and disk loading.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Do not redefine <code>mi2:</code> from <code>0007</code>.</li>
+<li>Do not make <code>msa1:</code> a Global Store catalog identity or a cross-daemon routing
+  contract.</li>
+<li>Do not make resolve-time mounted attestation a durable registration path.</li>
+<li>Do not mint primary <code>mi2:</code> identity from the default mounted resolve fast
+  path.</li>
+<li>Do not treat optimistic local-ready serving as Global Store publication,
+  durable key activation, cross-daemon routing, or content verification.</li>
+<li>Do not preserve compatibility shims such as <code>disksrc:</code> or
+  <code>cgid:disk_source~...</code>.</li>
+<li>Do not keep long-term request-level trust toggles that bypass typed mounted
+  policy.</li>
+<li>Do not promise tensor-aware semantics for every mounted directory shape when
+  the repository does not have authoritative tensor metadata for that format.</li>
+</ul>
+<h1 id="prior-constraints-reviewed">Prior Constraints Reviewed<a class="headerlink" href="#prior-constraints-reviewed" title="Permanent link">&para;</a></h1>
+<h2 id="0004-unified-runtime-config"><code>0004</code> Unified Runtime Config<a class="headerlink" href="#0004-unified-runtime-config" title="Permanent link">&para;</a></h2>
+<p>Kept and strengthened.</p>
+<p>Trusted mounted-source behavior must be modeled as typed daemon config with
+explicit defaults, validation, and restart-time semantics.</p>
+<p>Long-term rule:</p>
+<ul>
+<li>mounted-source trust, descriptor reuse, lightweight attestation, and
+  revalidation are daemon config concerns,</li>
+<li>not per-call ambient behavior.</li>
+</ul>
+<h2 id="0007-content-addressed-artifact-id"><code>0007</code> Content-Addressed Artifact ID<a class="headerlink" href="#0007-content-addressed-artifact-id" title="Permanent link">&para;</a></h2>
+<p>Kept exactly.</p>
+<p><code>mi2:</code> remains the only verified content identity.
+<code>msa1:</code> is not a weaker <code>mi2:</code>; it is a different identity family with a
+different authority contract.</p>
+<h2 id="0009-safetensors-loader-integration"><code>0009</code> Safetensors Loader Integration<a class="headerlink" href="#0009-safetensors-loader-integration" title="Permanent link">&para;</a></h2>
+<p>Kept and made normative for mounted attestation.</p>
+<p>Safetensors attestation must preserve the existing source-layer rules:</p>
+<ul>
+<li>payload byte space excludes headers,</li>
+<li>canonical index is rebuilt from headers,</li>
+<li>filename ordering is lexicographic,</li>
+<li>and descriptor absence is permitted.</li>
+</ul>
+<h2 id="0017-client-generated-artifact-id"><code>0017</code> Client-Generated Artifact ID<a class="headerlink" href="#0017-client-generated-artifact-id" title="Permanent link">&para;</a></h2>
+<p>Kept by exclusion rather than reused.</p>
+<p><code>cgid:</code> remains the client-generated identity family.
+Mounted-source attestation should not overload <code>cgid:</code> because the source of
+authority is different:</p>
+<ul>
+<li><code>cgid:</code> is client-asserted,</li>
+<li><code>msa1:</code> is daemon-attested under trusted mounted-source policy.</li>
+</ul>
+<h2 id="0077-unified-reference-only-disk-import"><code>0077</code> Unified Reference-Only Disk Import<a class="headerlink" href="#0077-unified-reference-only-disk-import" title="Permanent link">&para;</a></h2>
+<p>Kept with a sharper boundary.</p>
+<p><code>ImportArtifactFromPath</code> remains the explicit durable <code>mi2:</code> path.
+Mounted-source attestation is separate:</p>
+<ul>
+<li>it may reuse format-aware metadata builders,</li>
+<li>but it does not share import semantics,</li>
+<li>it does not durably register the mounted source at resolve time,</li>
+<li>and it does not promote the mounted source to primary <code>mi2:</code> identity in the
+  fast path.</li>
+</ul>
+<h2 id="0084-binding-unified-model"><code>0084</code> Binding Unified Model<a class="headerlink" href="#0084-binding-unified-model" title="Permanent link">&para;</a></h2>
+<p>Strengthened.</p>
+<p>Bindings should not need a second public source-handle plane.
+A mounted source that has been attested to <code>msa1:</code> is already an artifact
+subject in the binding sense, even though it is not yet a published or globally
+routable <code>mi2:</code>.</p>
+<h2 id="0091-selection-identity-resolved-source-verified-content"><code>0091</code> Selection Identity / Resolved Source / Verified Content<a class="headerlink" href="#0091-selection-identity-resolved-source-verified-content" title="Permanent link">&para;</a></h2>
+<p>Applied directly.</p>
+<p>Mounted-source attestation must feed the existing shared truth layering:</p>
+<ul>
+<li>exact source size and provenance still belong in <code>ResolvedSourceDescriptor</code>,</li>
+<li><code>msa1:</code> is an artifact identity family, not content truth,</li>
+<li>mounted snapshot validation is source-shape consistency, not content
+  verification,</li>
+<li>and final <code>mi2:</code> still comes only from content verification or explicit
+  durable promotion.</li>
+</ul>
+<h2 id="0092-artifact-profiles-truth-layering"><code>0092</code> Artifact Profiles / Truth Layering<a class="headerlink" href="#0092-artifact-profiles-truth-layering" title="Permanent link">&para;</a></h2>
+<p>Applied directly.</p>
+<p>Mounted-source artifacts are best modeled as:</p>
+<ul>
+<li>a distinct artifact profile,</li>
+<li>with daemon-session-local authority,</li>
+<li>lowering into the shared executor like any other artifact family.</li>
+</ul>
+<h2 id="0112-binding-native-serving-realization-and-publication"><code>0112</code> Binding-Native Serving Realization And Publication<a class="headerlink" href="#0112-binding-native-serving-realization-and-publication" title="Permanent link">&para;</a></h2>
+<p>Cleaned up.</p>
+<p>The long-term missing piece was not "invent a fake artifact id when
+<code>artifact_id</code> is empty."
+The missing piece was "attest mounted trusted sources into a lightweight
+artifact profile so binding-native serving can stay artifact-first without
+forcing <code>mi2:</code> hashing on the cold path."</p>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-public-contract-attested-mounted-artifact-not-source-handle-resolution">1. Public Contract: Attested Mounted Artifact, Not Source Handle Resolution<a class="headerlink" href="#1-public-contract-attested-mounted-artifact-not-source-handle-resolution" title="Permanent link">&para;</a></h2>
+<p>The long-term public contract is:</p>
+<ul>
+<li>resolve a local mounted path,</li>
+<li>attest it under daemon policy,</li>
+<li>return a mounted-source artifact subject whose <code>artifact_id</code> is always
+  non-empty,</li>
+<li>and use <code>msa1:</code> as that subject's primary public identity.</li>
+</ul>
+<p>The public result may still temporarily travel through a message named
+<code>PublicDiskSourceHandle</code> in the first cut, but its semantics should change:</p>
+<ul>
+<li><code>artifact_id</code> is required on success,</li>
+<li><code>artifact_id</code> is always <code>msa1:</code>,</li>
+<li>any known <code>mi2:</code> is returned only as optional content truth metadata,</li>
+<li>and any daemon-local snapshot token is internal state, not the public
+  identity.</li>
+</ul>
+<p>Required result facts:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>artifact_id</code></td>
+<td>required; always <code>msa1:</code> on successful mounted resolve</td>
+</tr>
+<tr>
+<td><code>trusted_content_artifact_id</code></td>
+<td>optional <code>mi2:</code> already known from a trusted descriptor or explicit verification path</td>
+</tr>
+<tr>
+<td><code>path</code></td>
+<td>normalized local path under daemon policy</td>
+</tr>
+<tr>
+<td><code>canonical_index_bytes</code></td>
+<td>canonical source bytes used for planning and selection</td>
+</tr>
+<tr>
+<td><code>source_index_bytes</code></td>
+<td>optional physical-layout bytes when the format has distinct source layout</td>
+</tr>
+<tr>
+<td><code>format_kind</code></td>
+<td><code>PARTITIONED</code> or <code>SAFETENSORS</code></td>
+</tr>
+<tr>
+<td><code>metadata_capability</code></td>
+<td><code>TENSOR_AWARE</code> or <code>BYTE_ONLY</code></td>
+</tr>
+<tr>
+<td><code>resolution_strategy</code></td>
+<td><code>ATTESTED_ONLY</code> or <code>ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT</code></td>
+</tr>
+<tr>
+<td><code>policy_id</code></td>
+<td>stable trusted-source policy id</td>
+</tr>
+<tr>
+<td><code>validation_mode</code></td>
+<td>how every later mounted-source read revalidates the snapshot</td>
+</tr>
+<tr>
+<td><code>exact_size_bytes</code></td>
+<td>authoritative logical byte length for lowering</td>
+</tr>
+<tr>
+<td><code>generation</code></td>
+<td>derived from canonical index bytes only</td>
+</tr>
+</tbody>
+</table>
+<p>Design rules:</p>
+<ul>
+<li>successful public mounted resolve must no longer mean
+  "<code>artifact_id</code> maybe empty but here is some other source-plane token,"</li>
+<li>resolve-time mounted attestation must no longer use <code>mi2:</code> as the mounted
+  artifact's primary identity,</li>
+<li>and default mounted resolve must not hash payload bytes to form identity.</li>
+</ul>
+<h2 id="2-new-identity-family-msa1">2. New Identity Family: <code>msa1:</code><a class="headerlink" href="#2-new-identity-family-msa1" title="Permanent link">&para;</a></h2>
+<h3 id="21-meaning">2.1 Meaning<a class="headerlink" href="#21-meaning" title="Permanent link">&para;</a></h3>
+<p><code>msa1:</code> is a daemon-attested mounted-source artifact id.</p>
+<p>It means:</p>
+<ul>
+<li>this daemon session resolved a mounted source under a trusted policy,</li>
+<li>the mounted source passed format-aware metadata construction,</li>
+<li>the mounted snapshot evidence matched policy at resolve time,</li>
+<li>and the daemon is willing to treat that snapshot as an artifact subject for
+  same-daemon artifact APIs and binding-native execution.</li>
+</ul>
+<p>It does <strong>not</strong> mean:</p>
+<ul>
+<li>payload bytes were fully hashed,</li>
+<li>the object is globally routable,</li>
+<li>the object is GS-cataloged,</li>
+<li>the object is durable across daemon restart,</li>
+<li>or the object is exempt from later revalidation before read.</li>
+</ul>
+<h3 id="22-stable-shape">2.2 Stable shape<a class="headerlink" href="#22-stable-shape" title="Permanent link">&para;</a></h3>
+<p>Suggested shape:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>msa1:&lt;daemon_session_enc&gt;~&lt;policy_id_enc&gt;~&lt;format_kind&gt;~&lt;snapshot_digest_hex&gt;
+</span></code></pre></div>
+<p>Where <code>snapshot_digest_hex</code> is computed from:</p>
+<ul>
+<li>normalized path,</li>
+<li>policy id,</li>
+<li>format kind,</li>
+<li>metadata capability,</li>
+<li>canonical index digest,</li>
+<li>optional source index digest,</li>
+<li>exact size,</li>
+<li>and format-aware snapshot evidence.</li>
+</ul>
+<h3 id="23-generation-semantics">2.3 Generation semantics<a class="headerlink" href="#23-generation-semantics" title="Permanent link">&para;</a></h3>
+<p><code>generation</code> remains derived from canonical index bytes.</p>
+<p>It is useful for:</p>
+<ul>
+<li>lowering,</li>
+<li>metadata cache coherence,</li>
+<li>and request/result compatibility checks tied to layout.</li>
+</ul>
+<p>It must <strong>not</strong> be used as:</p>
+<ul>
+<li>a mounted-source freshness token,</li>
+<li>a mutation detector,</li>
+<li>or a substitute for snapshot revalidation.</li>
+</ul>
+<p>Mounted-source freshness is determined by mounted snapshot evidence and the
+<code>msa1:</code> snapshot digest, not by <code>generation</code>.</p>
+<h3 id="24-identity-strength">2.4 Identity strength<a class="headerlink" href="#24-identity-strength" title="Permanent link">&para;</a></h3>
+<p><code>artifact_id</code> identity families now have different authority strengths:</p>
+<table>
+<thead>
+<tr>
+<th>Identity family</th>
+<th>Authority strength</th>
+<th>Typical owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>mi2:</code></td>
+<td>content-verified</td>
+<td>shared verification seam</td>
+</tr>
+<tr>
+<td><code>msa1:</code></td>
+<td>daemon-attested mounted-source artifact</td>
+<td>local daemon policy + mounted snapshot registry</td>
+</tr>
+<tr>
+<td><code>cgid:</code></td>
+<td>client-asserted runtime artifact</td>
+<td>client / profile-specific authority</td>
+</tr>
+</tbody>
+</table>
+<p>This keeps the repository artifact-first without pretending every artifact id
+implies the same proof level.</p>
+<h2 id="3-internal-mounted-source-snapshot-registry">3. Internal Mounted Source Snapshot Registry<a class="headerlink" href="#3-internal-mounted-source-snapshot-registry" title="Permanent link">&para;</a></h2>
+<p>The daemon still needs local snapshot state, but that state should be internal.</p>
+<p>The mounted-source registry should be keyed by <code>artifact_id</code> for <code>msa1:</code> and
+record:</p>
+<ul>
+<li>normalized source path,</li>
+<li>policy id,</li>
+<li>format kind,</li>
+<li>metadata capability,</li>
+<li>canonical index bytes,</li>
+<li>optional source index bytes,</li>
+<li>exact size,</li>
+<li>snapshot evidence and file fingerprints,</li>
+<li>validation mode,</li>
+<li>optional trusted descriptor facts,</li>
+<li>optional <code>trusted_content_artifact_id</code>,</li>
+<li>optional promoted <code>mi2:</code> if later explicitly verified or imported,</li>
+<li>and last validation result / timestamp for diagnostics.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>The same mounted path may re-resolve to the same <code>msa1:</code> only if the daemon
+   session, policy, metadata, and snapshot evidence all still match.</li>
+<li>If snapshot evidence changes, resolve must mint a different <code>msa1:</code>.</li>
+<li>After daemon restart, prior <code>msa1:</code> values are invalid regardless of path
+   equality.</li>
+<li>An internal <code>source_snapshot_ref</code> may still exist for implementation
+   convenience, but it is not the public contract.</li>
+</ol>
+<h2 id="4-profile-and-authority-model">4. Profile And Authority Model<a class="headerlink" href="#4-profile-and-authority-model" title="Permanent link">&para;</a></h2>
+<p>Mounted-source attestation should become an explicit artifact profile in the
+<code>0092</code> sense:</p>
+<ul>
+<li>profile: <code>mounted_source_artifact</code></li>
+<li>family: ordinary artifact family</li>
+<li>authority model: <code>daemon_session_local</code></li>
+</ul>
+<p>Implications:</p>
+<ul>
+<li>it uses <code>ArtifactSelection</code> like ordinary artifacts,</li>
+<li>it lowers through the shared executor,</li>
+<li>it is not GS-backed metadata authority,</li>
+<li>and it does not opt into routed or cross-daemon retrieval merely by being an
+  artifact id.</li>
+</ul>
+<p>This is the core reason <code>msa1:</code> is better than a public source-handle plane:</p>
+<ul>
+<li>it keeps one artifact-centric object model,</li>
+<li>while still preserving narrower authority semantics than <code>mi2:</code>.</li>
+</ul>
+<h3 id="41-surface-admission-matrix">4.1 Surface admission matrix<a class="headerlink" href="#41-surface-admission-matrix" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Surface</th>
+<th><code>msa1:</code> behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>same-daemon <code>Store.artifact(msa1)</code></td>
+<td>allowed</td>
+</tr>
+<tr>
+<td>same-daemon materialization / target realization</td>
+<td>allowed</td>
+</tr>
+<tr>
+<td>binding-native realization</td>
+<td>allowed</td>
+</tr>
+<tr>
+<td>tensor-aware view planning</td>
+<td>allowed only when <code>metadata_capability=TENSOR_AWARE</code></td>
+</tr>
+<tr>
+<td>Global Store artifact-info RPCs</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td>key activation / durable key mapping</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td>cross-daemon retrieval as if GS-backed</td>
+<td>rejected</td>
+</tr>
+<tr>
+<td>optimistic same-daemon local serving</td>
+<td>allowed only by typed policy, with pending <code>mi2</code> verification</td>
+</tr>
+<tr>
+<td>canonical / durable publication identity</td>
+<td>rejected until explicit promotion to <code>mi2:</code></td>
+</tr>
+</tbody>
+</table>
+<p>The profile and authority model, not just the string prefix, must control
+surface admission.</p>
+<h2 id="5-metadata-capability-and-format-support">5. Metadata Capability And Format Support<a class="headerlink" href="#5-metadata-capability-and-format-support" title="Permanent link">&para;</a></h2>
+<p>Mounted-source attestation must be explicit about metadata capability.</p>
+<h3 id="51-capability-levels">5.1 Capability levels<a class="headerlink" href="#51-capability-levels" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>TENSOR_AWARE</code></li>
+<li>canonical tensor metadata is authoritative,</li>
+<li>view planning and tensor-aware binding realization are allowed.</li>
+<li><code>BYTE_ONLY</code></li>
+<li>only byte-space semantics are authoritative,</li>
+<li>tensor-aware view or binding flows are not allowed.</li>
+</ul>
+<h3 id="52-first-cut-support-matrix">5.2 First-cut support matrix<a class="headerlink" href="#52-first-cut-support-matrix" title="Permanent link">&para;</a></h3>
+<p>Required:</p>
+<ul>
+<li>safetensors directories: <code>TENSOR_AWARE</code></li>
+<li>partitioned directories with <code>tensor_index.json|cbor</code>: <code>TENSOR_AWARE</code></li>
+</ul>
+<p>Optional first cut:</p>
+<ul>
+<li>partitioned directories without <code>tensor_index.json|cbor</code>: <code>BYTE_ONLY</code></li>
+</ul>
+<p>Explicit non-goal for this design:</p>
+<ul>
+<li>do not silently treat partitioned-without-index as tensor-aware just because
+  payload files exist.</li>
+</ul>
+<h2 id="6-shared-core-metadata-seam">6. Shared Core Metadata Seam<a class="headerlink" href="#6-shared-core-metadata-seam" title="Permanent link">&para;</a></h2>
+<p>The repository should introduce one shared core metadata builder for mounted
+disk sources and reuse it across:</p>
+<ul>
+<li>mounted-source attestation,</li>
+<li>import,</li>
+<li>disk hashing,</li>
+<li>and disk loading.</li>
+</ul>
+<p>Suggested shared output object:</p>
+<ul>
+<li><code>MountedSourceMetadata</code></li>
+</ul>
+<p>Suggested core builder:</p>
+<ul>
+<li><code>build_mounted_source_metadata(...)</code></li>
+</ul>
+<p>That builder should produce:</p>
+<ul>
+<li>format kind,</li>
+<li>metadata capability,</li>
+<li>canonical index bytes,</li>
+<li>optional source index bytes,</li>
+<li>exact size,</li>
+<li>canonical index digest,</li>
+<li>optional source index digest,</li>
+<li>descriptor metadata,</li>
+<li>and format-aware snapshot evidence.</li>
+</ul>
+<h3 id="61-directory-scope-rule">6.1 Directory scope rule<a class="headerlink" href="#61-directory-scope-rule" title="Permanent link">&para;</a></h3>
+<p>Detection and snapshot evidence must match loader semantics.</p>
+<p>Normative rule:</p>
+<ul>
+<li>the mounted artifact directory is the normalized path passed to resolve,</li>
+<li>detection is <strong>non-recursive</strong> and inspects top-level files in that directory
+  only,</li>
+<li>nested files or nested subdirectories must not participate in format
+  detection, snapshot evidence, hashing, or loading.</li>
+</ul>
+<p>Policy root matching is separate from artifact directory scope:</p>
+<ul>
+<li>policy roots may allow a parent directory tree,</li>
+<li>but the resolved mounted artifact directory still has one concrete,
+  non-recursive scope.</li>
+</ul>
+<p>This avoids the current drift risk where one caller recursively discovers files
+that the loader and hash path would ignore.</p>
+<h3 id="62-detection-rules">6.2 Detection rules<a class="headerlink" href="#62-detection-rules" title="Permanent link">&para;</a></h3>
+<p>Detection must match loader semantics:</p>
+<ol>
+<li>if top-level <code>tensor.data</code> or any top-level <code>tensor.data_N</code> is present,
+   format is <code>PARTITIONED</code>,</li>
+<li>else if any top-level <code>*.safetensors</code> file is present, format is
+   <code>SAFETENSORS</code>,</li>
+<li>else fail with source-format error.</li>
+</ol>
+<p>Mixed top-level directories resolve as <code>PARTITIONED</code>.</p>
+<h2 id="7-format-specific-rules">7. Format-Specific Rules<a class="headerlink" href="#7-format-specific-rules" title="Permanent link">&para;</a></h2>
+<h3 id="71-partitioned-format">7.1 Partitioned format<a class="headerlink" href="#71-partitioned-format" title="Permanent link">&para;</a></h3>
+<p>Payload-bearing files:</p>
+<ul>
+<li><code>tensor.data</code></li>
+<li><code>tensor.data_0</code>, <code>tensor.data_1</code>, ...</li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>multipart ordering is numeric by suffix, not lexicographic,</li>
+<li><code>tensor_index.json|cbor</code> are metadata sidecars, not payload bytes,</li>
+<li>no-index partitioned support, if shipped in the first cut, is <code>BYTE_ONLY</code>,</li>
+<li>a valid trusted descriptor may populate
+  <code>trusted_content_artifact_id = mi2:...</code>,</li>
+<li>but it must not replace primary <code>artifact_id = msa1:...</code>.</li>
+</ul>
+<p>Snapshot evidence:</p>
+<ul>
+<li>numeric-ordered payload file list,</li>
+<li>relative path, size, and <code>mtime_ns</code>,</li>
+<li>daemon-local stronger fingerprints such as <code>(inode, size, mtime_ns)</code>.</li>
+</ul>
+<h3 id="72-safetensors-format">7.2 Safetensors format<a class="headerlink" href="#72-safetensors-format" title="Permanent link">&para;</a></h3>
+<p>Payload-bearing files:</p>
+<ul>
+<li>all <code>*.safetensors</code> files, ordered lexicographically by filename</li>
+</ul>
+<p>Rules:</p>
+<ul>
+<li>payload byte space excludes headers,</li>
+<li>canonical index is rebuilt from the headers,</li>
+<li>descriptor absence is allowed,</li>
+<li>filename ordering is lexicographic,</li>
+<li>source layout is physical metadata only and does not define identity,</li>
+<li>a valid trusted descriptor may populate
+  <code>trusted_content_artifact_id = mi2:...</code>,</li>
+<li>but it must not replace primary <code>artifact_id = msa1:...</code>.</li>
+</ul>
+<p>Snapshot evidence:</p>
+<ul>
+<li>lexicographic <code>*.safetensors</code> order,</li>
+<li>relative path, payload size, and <code>mtime_ns</code>,</li>
+<li>header-derived canonical/source layout facts,</li>
+<li>no header bytes treated as payload identity bytes.</li>
+</ul>
+<h2 id="8-attestation-and-verification-paths">8. Attestation And Verification Paths<a class="headerlink" href="#8-attestation-and-verification-paths" title="Permanent link">&para;</a></h2>
+<p>Mounted-source resolve should follow this order:</p>
+<ol>
+<li>normalize path and validate policy scope,</li>
+<li>build shared mounted-source metadata,</li>
+<li>load descriptor metadata if present,</li>
+<li>mint primary <code>artifact_id = msa1:...</code> from metadata and snapshot evidence,</li>
+<li>if a trusted descriptor is present, self-consistent, and names a valid
+   <code>mi2:</code>, attach <code>trusted_content_artifact_id = mi2:...</code>,</li>
+<li>register or refresh internal mounted snapshot state for later same-daemon
+   reuse.</li>
+</ol>
+<p>Critical rules:</p>
+<ul>
+<li><code>ResolvePublicDiskSource</code> must no longer call import-style hashing as its
+  primary implementation,</li>
+<li>successful mounted resolve must no longer switch primary identity from
+  <code>msa1:</code> to <code>mi2:</code> just because a trusted descriptor was present,</li>
+<li>and default mounted resolve must not hash payload bytes.</li>
+</ul>
+<p>Any strong content-verification path is separate:</p>
+<ul>
+<li>explicit import,</li>
+<li>explicit verify,</li>
+<li>or seal from realized bytes.</li>
+</ul>
+<p>Those paths may produce <code>mi2:</code>, but that is later promotion, not the default
+resolve contract.</p>
+<h2 id="9-runtime-integration">9. Runtime Integration<a class="headerlink" href="#9-runtime-integration" title="Permanent link">&para;</a></h2>
+<h3 id="91-local-artifact-apis">9.1 Local artifact APIs<a class="headerlink" href="#91-local-artifact-apis" title="Permanent link">&para;</a></h3>
+<p>Within the same daemon session, generic local artifact surfaces should accept
+<code>msa1:</code>:</p>
+<ul>
+<li><code>Store.artifact(msa1)</code></li>
+<li>artifact selection and metadata caching</li>
+<li>local materialization paths</li>
+<li>binding-native realization</li>
+</ul>
+<p>These surfaces resolve <code>msa1:</code> through the daemon's mounted-source registry
+rather than through Global Store.</p>
+<h3 id="92-required-mounted-snapshot-revalidation">9.2 Required mounted snapshot revalidation<a class="headerlink" href="#92-required-mounted-snapshot-revalidation" title="Permanent link">&para;</a></h3>
+<p>Mounted-source attestation is only safe if every later read revalidates the
+snapshot according to policy.</p>
+<p>Normative rules:</p>
+<ol>
+<li>Before any disk read or lowering that consumes <code>msa1:</code>, the daemon must
+   revalidate current mounted snapshot evidence against the stored registry
+   entry according to <code>validation_mode</code>.</li>
+<li>Snapshot mismatch must fail closed and invalidate or poison the mounted
+   snapshot registry entry for that <code>msa1:</code>.</li>
+<li>The daemon must not silently auto-refresh a mismatched <code>msa1:</code> during the
+   same request.</li>
+<li>Callers must obtain a fresh resolve result to continue after mismatch.</li>
+</ol>
+<p>Recommended default:</p>
+<ul>
+<li><code>validation_mode = VALIDATE_BEFORE_READ</code></li>
+</ul>
+<p>Compatibility-only weaker modes, if any, must be explicitly typed, narrowly
+scoped, and not be the default for trusted mounted-source policy.</p>
+<h3 id="93-rejected-surfaces">9.3 Rejected surfaces<a class="headerlink" href="#93-rejected-surfaces" title="Permanent link">&para;</a></h3>
+<p>The following remain closed to <code>msa1:</code>:</p>
+<ul>
+<li>Global Store artifact-info RPCs</li>
+<li>key activation and durable key mapping</li>
+<li>cross-daemon retrieval as though <code>msa1:</code> were GS-backed</li>
+<li>canonical or durable final publication identity</li>
+</ul>
+<p>This keeps authority boundaries explicit.</p>
+<h3 id="94-binding-native-serving">9.4 Binding-native serving<a class="headerlink" href="#94-binding-native-serving" title="Permanent link">&para;</a></h3>
+<p>Binding-native serving should consume a mounted-source artifact directly.</p>
+<p>That means:</p>
+<ul>
+<li>no fabricated <code>disksrc:</code> id,</li>
+<li>no parallel source-handle-only execution carrier,</li>
+<li>and no requirement that mounted ingress produce <code>mi2:</code> before realization.</li>
+</ul>
+<p>If the source is attested as <code>msa1:</code>, the binding current value is already
+artifact-backed in the profile sense, even though it is not yet content-verified
+or globally routable.</p>
+<h3 id="95-optimistic-local-ready-serving">9.5 Optimistic local-ready serving<a class="headerlink" href="#95-optimistic-local-ready-serving" title="Permanent link">&para;</a></h3>
+<p>Optimistic local-ready serving is a performance mode layered above the mounted
+source contract. It does not change what <code>msa1:</code> means.</p>
+<p>An admitted binding-native flow may mark a realized serving value ready before
+<code>mi2:</code> promotion only when all of the following are true:</p>
+<ul>
+<li>the source artifact is a trusted <code>msa1:</code> and its snapshot evidence has been
+  revalidated for the read;</li>
+<li>the model family and topology are explicitly admitted for same-binding
+  optimistic startup;</li>
+<li>the realized value is frozen against further mutation;</li>
+<li>serving schema, representation contract, serving build digest, and family
+  semantic validation have passed;</li>
+<li>the daemon records <code>verification_state=pending</code> and either schedules
+  asynchronous promotion to <code>mi2:</code> or explicitly marks the value local-only by
+  policy.</li>
+</ul>
+<p>For tensor-parallel local bootstrap, the integration must not start <code>mi2</code>
+promotion when the first rank freezes. All local ranks in the serving TP group
+must first finish their local-ready transition: realization, tensor attachment,
+runtime-only allocation, finalize/validation, <code>freeze_current</code>, and local
+runtime-state installation. The local-ready barrier is therefore part of the
+optimistic serving contract, not merely a profiling convenience.</p>
+<p>While verification is pending, the value is not content-verified, not GS
+routable, not durable-key activatable, and not a canonical publication result.</p>
+<h2 id="10-promotion-to-mi2">10. Promotion To <code>mi2:</code><a class="headerlink" href="#10-promotion-to-mi2" title="Permanent link">&para;</a></h2>
+<p><code>mi2:</code> remains the only content-verified identity.</p>
+<p>Mounted-source artifacts may later promote from <code>msa1:</code> to <code>mi2:</code> through:</p>
+<ul>
+<li>explicit import,</li>
+<li>explicit verification,</li>
+<li>or seal from realized bytes.</li>
+</ul>
+<p>For optimistic local-ready serving, this promotion may run asynchronously after
+the serving value is already live. Success may attach a canonical
+<code>serving_artifact_id = mi2:...</code> and complete normal publication closeout.
+Failure must not be silently ignored: the daemon must record a failed
+verification state and apply the configured failure policy.</p>
+<p>Starting promotion and running promotion are separate scheduling events.
+<code>StartPromoteBindingCurrentValue</code> must create or return an observable idempotent
+job for the frozen <code>binding_id + binding_value_id</code>; the daemon may delay actual
+hash/commit work until critical load operations such as binding refill,
+freeze, or large binding allocation are no longer active. Status polling must
+remain cheap and must not perform promotion work itself.</p>
+<p>A trusted descriptor may also populate <code>trusted_content_artifact_id = mi2:...</code>
+earlier, but that hint does not change the mounted artifact's primary identity.</p>
+<p>The daemon may record an internal alias from <code>msa1:</code> to the resulting <code>mi2:</code>
+for session-local reuse, but <code>msa1:</code> and <code>mi2:</code> remain different identity
+families with different guarantees.</p>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<h2 id="identity-helpers">Identity helpers<a class="headerlink" href="#identity-helpers" title="Permanent link">&para;</a></h2>
+<p>Add <code>MSA1</code> to shared identity helpers and validators in:</p>
+<ul>
+<li><code>tensorcast/common/identity.py</code></li>
+<li><code>core/common/artifact_identity.{h,cc}</code></li>
+</ul>
+<h2 id="artifact-profile-registry">Artifact profile registry<a class="headerlink" href="#artifact-profile-registry" title="Permanent link">&para;</a></h2>
+<p>Add a mounted-source profile with daemon-session-local authority.</p>
+<h2 id="public-mounted-resolve-schema">Public mounted resolve schema<a class="headerlink" href="#public-mounted-resolve-schema" title="Permanent link">&para;</a></h2>
+<p>First cut:</p>
+<ul>
+<li>keep the existing RPC name if desired,</li>
+<li>but require non-empty <code>artifact_id</code> on success,</li>
+<li>require <code>artifact_id</code> to be <code>msa1:</code> on success,</li>
+<li>add optional <code>trusted_content_artifact_id</code>,</li>
+<li>remove public dependence on <code>source_snapshot_ref</code>,</li>
+<li>and add explicit fields for format kind, metadata capability,
+  resolution strategy, validation mode, policy id, and exact size.</li>
+</ul>
+<p>Longer term:</p>
+<ul>
+<li>rename the result object away from <code>PublicDiskSourceHandle</code> once the contract
+  no longer behaves like a handle,</li>
+<li>suggested long-term type name: <code>MountedSourceArtifactRef</code>.</li>
+</ul>
+<h2 id="config">Config<a class="headerlink" href="#config" title="Permanent link">&para;</a></h2>
+<p>Add typed trusted mounted-source policy under unified runtime config, including:</p>
+<ul>
+<li><code>policy_id</code></li>
+<li><code>root_path</code></li>
+<li><code>allowed_formats</code></li>
+<li><code>allowed_metadata_capabilities</code></li>
+<li><code>descriptor_reuse_mode</code></li>
+<li><code>lightweight_attestation_mode</code></li>
+<li><code>validation_mode</code></li>
+</ul>
+<p>Normative policy ownership rules:</p>
+<ul>
+<li>daemon config decides whether lightweight <code>msa1</code> attestation is allowed,</li>
+<li>daemon config decides whether trusted descriptors may populate
+  <code>trusted_content_artifact_id</code>,</li>
+<li>and daemon config decides mounted snapshot validation mode.</li>
+</ul>
+<p>Recommended defaults:</p>
+<ul>
+<li>lightweight attestation enabled for trusted mounted-source roots,</li>
+<li><code>validation_mode = VALIDATE_BEFORE_READ</code>.</li>
+</ul>
+<h3 id="transition-rule-for-existing-request-flags">Transition rule for existing request flags<a class="headerlink" href="#transition-rule-for-existing-request-flags" title="Permanent link">&para;</a></h3>
+<p>The existing request-level <code>verify_checksums</code> flag may survive briefly during
+transition, but only under a compatibility rule:</p>
+<ul>
+<li>it may request stricter descriptor checking than policy,</li>
+<li>it must not weaken mounted-source policy,</li>
+<li>it must not disable required mounted snapshot revalidation,</li>
+<li>and it must not be the long-term source of mounted trust semantics.</li>
+</ul>
+<p>Long-term mounted-source trust behavior belongs in typed config only.</p>
+<h2 id="no-global-store-schema-change-in-the-first-cut">No Global Store schema change in the first cut<a class="headerlink" href="#no-global-store-schema-change-in-the-first-cut" title="Permanent link">&para;</a></h2>
+<p><code>msa1:</code> is daemon-session-local authority, so the primary design does not
+require GS schema changes.</p>
+<h2 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h2>
+<p>Proposed interface names in this design follow repository naming rules.</p>
+<p>Classes / structs:</p>
+<ul>
+<li><code>MountedSourceMetadata</code></li>
+<li><code>MountedSourceSnapshot</code></li>
+<li><code>MountedSourceArtifactRef</code></li>
+</ul>
+<p>Functions / methods:</p>
+<ul>
+<li><code>build_mounted_source_metadata(...)</code></li>
+<li><code>mint_msa1_artifact_id(...)</code></li>
+<li><code>revalidate_mounted_source_snapshot(...)</code></li>
+<li><code>resolve_mounted_source_artifact(...)</code></li>
+<li><code>promote_mounted_source_to_mi2(...)</code></li>
+</ul>
+<p>Enums / constants:</p>
+<ul>
+<li><code>VALIDATE_BEFORE_READ</code></li>
+<li><code>ATTESTED_ONLY</code></li>
+<li><code>ATTESTED_WITH_TRUSTED_DESCRIPTOR_HINT</code></li>
+</ul>
+<h1 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h1>
+<p>Emit structured fields:</p>
+<ul>
+<li><code>disk_source.format_kind</code></li>
+<li><code>disk_source.metadata_capability</code></li>
+<li><code>disk_source.policy_id</code></li>
+<li><code>disk_source.resolution_strategy</code></li>
+<li><code>disk_source.validation_mode</code></li>
+<li><code>disk_source.artifact_id_kind = msa1</code></li>
+<li><code>disk_source.trusted_content_hint_kind = none | mi2</code></li>
+<li><code>disk_source.hash_data_skipped = true | false</code></li>
+</ul>
+<p>Mounted evidence should report:</p>
+<ul>
+<li>safetensors vs partitioned separately,</li>
+<li>tensor-aware vs byte-only separately,</li>
+<li>attested-only vs trusted-descriptor-hint separately,</li>
+<li>and same-daemon snapshot revalidation success vs mismatch separately.</li>
+</ul>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<h2 id="trade-offs">Trade-offs<a class="headerlink" href="#trade-offs" title="Permanent link">&para;</a></h2>
+<ul>
+<li>This design intentionally broadens "artifact" beyond "already content
+  verified" by adding a daemon-attested mounted-source artifact family.</li>
+<li>In return, it removes the long-term need for a parallel public source-handle
+  object model.</li>
+<li><code>msa1:</code> is intentionally narrower than <code>mi2:</code> and narrower than ordinary
+  GS-backed artifact semantics.</li>
+<li>Keeping primary identity as <code>msa1:</code> even when <code>mi2:</code> is already hinted makes
+  the authority model explicit at the cost of exposing two related ids in some
+  responses.</li>
+</ul>
+<h2 id="risks">Risks<a class="headerlink" href="#risks" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Treating <code>msa1:</code> as a first-class artifact may tempt callers to assume GS or
+  cross-daemon behavior that the profile does not provide.</li>
+<li>Mitigation: profile-specific validation, authority traits, and explicit API
+    rejection outside local daemon-session surfaces.</li>
+<li>Mounted bytes may drift after resolve.</li>
+<li>Mitigation: required fail-closed snapshot revalidation before read.</li>
+<li>Format-specific metadata helpers may drift from loader rules.</li>
+<li>Mitigation: one shared core mounted-source metadata builder.</li>
+<li>Partitioned-without-index support can blur byte-only and tensor-aware
+  semantics.</li>
+<li>Mitigation: explicit <code>metadata_capability</code> and fail-closed tensor-aware
+    gating.</li>
+<li>Optional <code>trusted_content_artifact_id</code> may be mistaken for the mounted
+  artifact's primary identity.</li>
+<li>Mitigation: keep public <code>artifact_id</code> always <code>msa1:</code> and make the hint
+    field explicit.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<h2 id="compatibility-policy">Compatibility Policy<a class="headerlink" href="#compatibility-policy" title="Permanent link">&para;</a></h2>
+<p>This design assumes a hard cut at the contract level:</p>
+<ul>
+<li>no new <code>disksrc:</code> ids,</li>
+<li>no compact <code>cgid:disk_source~...</code> shims,</li>
+<li>no "success with empty <code>artifact_id</code>" semantics,</li>
+<li>no long-term public <code>source_snapshot_ref</code> dependency,</li>
+<li>and no long-term default hashing requirement in mounted resolve.</li>
+</ul>
+<h2 id="acceptance-criteria">Acceptance Criteria<a class="headerlink" href="#acceptance-criteria" title="Permanent link">&para;</a></h2>
+<ul>
+<li>successful mounted-source resolve always returns non-empty <code>artifact_id</code>,</li>
+<li>successful mounted-source resolve returns <code>artifact_id = msa1:...</code>,</li>
+<li>trusted descriptor-backed sources may return
+  <code>trusted_content_artifact_id = mi2:...</code> without re-hashing,</li>
+<li>trusted descriptorless sources can return <code>msa1:</code> without full payload
+  hashing,</li>
+<li>default mounted resolve does not require full payload hashing,</li>
+<li>binding-native mounted flows no longer synthesize <code>disksrc:</code>,</li>
+<li><code>Store.artifact(msa1)</code> and local same-daemon realization are valid,</li>
+<li>same-daemon <code>msa1:</code> reads revalidate snapshot evidence and fail closed on
+  mutation,</li>
+<li>GS-backed or cross-daemon-only surfaces reject <code>msa1:</code> cleanly,</li>
+<li>partitioned source evidence honors numeric <code>tensor.data_N</code> ordering,</li>
+<li>safetensors source evidence honors lexicographic <code>*.safetensors</code> ordering and
+  excludes headers from payload identity,</li>
+<li>mounted artifact directory scope is top-level-only and consistent across
+  resolve, hash, and load code paths,</li>
+<li>mounted serving evidence shows reduced cold resolve latency on audited trusted
+  mounts,</li>
+<li>optimistic local-ready serving, when enabled, reports pending verification
+  until asynchronous promotion succeeds or fails,</li>
+<li>and canonical/durable publish or seal still converges to <code>mi2:</code> as the only
+  content identity.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><a href="../0004-unified-runtime-config/">0004 Unified Runtime Configuration System</a></li>
+<li><a href="../0007-content-addressed-artifact-id/">0007 Content-Addressed Artifact ID</a></li>
+<li><a href="../0009-safetensors-loader-integration/">0009 Safetensors Loader Integration</a></li>
+<li><a href="../0017-client-generated-artifact-id/">0017 Client-Generated Artifact ID</a></li>
+<li><a href="../0077-unified-reference-only-disk-import/">0077 Unified Reference-Only Disk Import</a></li>
+<li><a href="../0084-binding-unified-model-and-contract/">0084 Binding Unified Model and Contract</a></li>
+<li><a href="../0091-selection-identity-resolved-source-and-verified-content-descriptor/">0091 Selection Identity, Resolved Source, and Verified Content</a></li>
+<li><a href="../0092-artifact-profiles-shared-dataplane-and-truth-layering/">0092 Artifact Profiles, Shared Dataplane, and Truth Layering</a></li>
+<li><a href="../0112-binding-native-serving-realization-and-publication/">0112 Binding-Native Serving Realization and Publication</a></li>
+<li><a href="./proto/tensorcast/daemon/v2/store_daemon.proto:694">proto/tensorcast/daemon/v2/store_daemon.proto</a></li>
+<li><a href="./daemon/service/controllers/disk_artifact_service.cc:479">daemon/service/controllers/disk_artifact_service.cc</a></li>
+<li><a href="./daemon/service/controllers/materialization_disk_resolve_utils.cc:239">daemon/service/controllers/materialization_disk_resolve_utils.cc</a></li>
+<li><a href="./daemon/service/controllers/materialization_index_source_utils.cc:139">daemon/service/controllers/materialization_index_source_utils.cc</a></li>
+<li><a href="./daemon/service/controllers/owned_binding_service.cc:1395">daemon/service/controllers/owned_binding_service.cc</a></li>
+<li><a href="./daemon/service/artifact_profile_registry.cc:285">daemon/service/artifact_profile_registry.cc</a></li>
+<li><a href="./daemon/state/artifact_source_registry.h:17">daemon/state/artifact_source_registry.h</a></li>
+<li><a href="./core/store/materialization/dataplane/metadata/disk_dir_hash.cc:102">core/store/materialization/dataplane/metadata/disk_dir_hash.cc</a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

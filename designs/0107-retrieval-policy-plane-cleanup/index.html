@@ -1,0 +1,3017 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0107-retrieval-policy-plane-cleanup/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Retrieval Policy Plane Cleanup, Execution Topology Context, And Transport Convergence - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Retrieval Policy Plane Cleanup, Execution Topology Context, And Transport Convergence
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Clean up retrieval policy as its own architectural plane.</p>
+<p>Implementation status:</p>
+<ul>
+<li>landed as a hard cut rather than a long-lived compatibility migration</li>
+<li><code>GetArtifactOptions</code> owns retrieval policy and execution topology</li>
+<li><code>Artifact</code> no longer owns or serializes retrieval policy</li>
+<li>retrieval-related daemon RPCs carry <code>source_policy</code> only</li>
+<li>temporary compatibility helpers (<code>FallbackOptions</code>, <code>with_fallback(...)</code>,
+  top-level request <code>preference</code>) are removed from the steady-state SDK surface</li>
+</ul>
+<p>Current repository state mixes five different concerns:</p>
+<ul>
+<li><code>ArtifactSelection</code> chooses which artifact/view/subset is requested.</li>
+<li><code>StorePolicy</code> chooses durability and placement outcomes after registration.</li>
+<li>retrieval source policy chooses which already-existing source categories are eligible during materialization.</li>
+<li>execution topology context chooses whether the request carries collective
+  group, source-sharing, and locality context for executor selection.</li>
+<li>rollout strategy chooses source-side lifecycle and worker realization behavior.</li>
+</ul>
+<p>This design separates those planes, moves retrieval policy to execution scope,
+keeps one structured transport contract for retrieval policy, gives topology
+context its own explicit boundary, and converges replica, target, mapped-target,
+and owned-binding flows on the same daemon/core policy model.</p>
+<p>The key correction is architectural:</p>
+<ul>
+<li>retrieval policy must not be modeled as artifact-handle identity</li>
+<li>retrieval policy must not reuse the <code>source_mode</code> name already used by rollout</li>
+<li>public preset sugar must not be the canonical wire contract</li>
+<li>retrieval policy must not become the carrier for collective topology or
+  shared-filesystem execution context</li>
+</ul>
+<h1 id="sequencing-note">Sequencing Note<a class="headerlink" href="#sequencing-note" title="Permanent link">&para;</a></h1>
+<p>This design now has two execution slices:</p>
+<ul>
+<li>runtime-critical request normalization:</li>
+<li>freeze one daemon-side internal request contract that separates retrieval
+    policy from execution topology context,</li>
+<li>remove request-merge drift before strategy planning begins.</li>
+<li>public API and compatibility cleanup:</li>
+<li>migrate SDK execution options,</li>
+<li>retire artifact-handle fallback ownership,</li>
+<li>remove compatibility-only surfaces after migration.</li>
+</ul>
+<p>Only the first slice is a hard prerequisite for the remaining <code>0108</code>
+convergence work and for any default-routing work from <code>0109</code>. The later
+SDK/public hard cut may continue after the internal normalizer boundary is
+stable, but no new collective strategy should become default before the
+runtime-critical slice lands.</p>
+<p>Compatibility policy:</p>
+<ul>
+<li>TensorCast does not yet have an external production compatibility burden for
+  this retrieval-policy surface.</li>
+<li>This landed with the target-state hard cut, so compatibility-only fallback
+  ownership and redundant request merge paths are deleted rather than preserved.</li>
+</ul>
+<p>Residual execution tracking:</p>
+<ul>
+<li>the retrieval-policy and execution-topology split defined here is already
+  landed and remains authoritative;</li>
+<li>downstream strategy-plane, owner-file collective, and same-binding serving
+  follow-up now track through the surviving owners:</li>
+<li><code>0108</code> plus its closure benchmarks,</li>
+<li><code>0109</code> plus its mounted closure benchmark,</li>
+<li><code>0112</code> plus its mounted closure benchmark;</li>
+<li>the deleted <code>0108</code>-series execution notes and later closure-only design notes
+  are no longer active SOT.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The current repository has one real problem expressed in several local forms:
+retrieval policy does not have a clean ownership boundary.</p>
+<h2 id="p1-handle-plane-drift">P1. Handle Plane Drift<a class="headerlink" href="#p1-handle-plane-drift" title="Permanent link">&para;</a></h2>
+<p><code>FallbackOptions</code> currently mixes:</p>
+<ul>
+<li>source selection (<code>prefer</code>, <code>allow_p2p</code>, <code>allow_disk</code>)</li>
+<li>replica reuse hint (<code>replica_uuid</code>)</li>
+<li>integrity behavior (<code>verify_checksums</code>)</li>
+</ul>
+<p>and that bundle is carried on <code>Artifact</code>, serialized via <code>Artifact.to_dict()</code>,
+and cloned via <code>with_fallback(...)</code>.</p>
+<p>This is the wrong plane. Retrieval source choice is execution-time policy, not
+artifact identity.</p>
+<h2 id="p2-transport-duplication">P2. Transport Duplication<a class="headerlink" href="#p2-transport-duplication" title="Permanent link">&para;</a></h2>
+<p>Current daemon requests duplicate the same decision through two channels:</p>
+<ul>
+<li>request-level <code>preference</code></li>
+<li><code>source_policy.preference</code> plus allow flags</li>
+</ul>
+<p>The client merges them once, then the daemon merges them again, and binding
+flows repeat the same pattern.</p>
+<h2 id="p3-plane-collisions">P3. Plane Collisions<a class="headerlink" href="#p3-plane-collisions" title="Permanent link">&para;</a></h2>
+<p>The name <code>source_mode</code> is already used in <code>0104</code> for rollout source lifetime
+(<code>transient</code> vs <code>local_steady_state</code>), which is a different state machine from
+retrieval source ordering.</p>
+<p>Reusing <code>source_mode</code> for retrieval would merge rollout semantics and
+materialization semantics under one public name.</p>
+<h2 id="p4-canonical-form-mismatch">P4. Canonical Form Mismatch<a class="headerlink" href="#p4-canonical-form-mismatch" title="Permanent link">&para;</a></h2>
+<p>Current core execution already reasons over a structured policy:</p>
+<ul>
+<li><code>SourcePreference</code></li>
+<li><code>allow_p2p</code></li>
+<li><code>allow_disk</code></li>
+</ul>
+<p>This structured form is what the orchestrator and ingestion facade actually
+consume. Replacing that canonical form with a narrow four-value mode would push
+compatibility and internal edge cases into ad hoc side channels.</p>
+<h2 id="p5-topology-context-drift">P5. Topology Context Drift<a class="headerlink" href="#p5-topology-context-drift" title="Permanent link">&para;</a></h2>
+<p>The current repository already carries collective execution context:</p>
+<ul>
+<li><code>collective_load_group</code></li>
+<li>shared-disk retry behavior</li>
+<li>integration-owned TP topology decisions</li>
+</ul>
+<p>But that context does not belong to retrieval source preference.</p>
+<p>If collective group or shared-source hints are treated as retrieval policy, the
+system loses an explicit boundary between:</p>
+<ul>
+<li>which source categories are allowed,</li>
+<li>which participants are cooperating,</li>
+<li>and whether the source media is host-local, shared, or unknown.</li>
+</ul>
+<p>That boundary is now important because the strategy-plane work from <code>0108</code> and
+<code>0109</code> needs a clean topology/context input for executor choice without
+polluting <code>ArtifactSelection</code>, <code>RetrievalPolicy</code>, or rollout semantics.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define retrieval policy as a distinct architectural plane.</li>
+<li>Define execution topology context as a distinct execution-scoped plane.</li>
+<li>Keep <code>ArtifactSelection</code> as the only selection/identity contract for
+  materialization.</li>
+<li>Keep <code>StorePolicy</code> as the only durability/placement declaration.</li>
+<li>Keep rollout source lifetime semantics owned by <code>0104</code>, not by retrieval APIs.</li>
+<li>Move retrieval policy to execution scope.</li>
+<li>Use one transport policy channel only across:</li>
+<li><code>MaterializeReplica</code></li>
+<li><code>MaterializeIntoTarget</code></li>
+<li><code>MaterializeIntoMappedTarget</code></li>
+<li><code>CreateOwnedBinding</code></li>
+<li><code>RefillOwnedBinding</code></li>
+<li>Keep the canonical daemon/core policy structured, not preset-shaped.</li>
+<li>Allow a smaller public preset surface without constraining the wire model.</li>
+<li>Keep collective topology, participant group, and source-sharing hints out of
+  retrieval policy.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine <code>ArtifactSelection</code>.</li>
+<li>Redefine <code>StorePolicy</code>.</li>
+<li>Change persistence schema in <code>schema.sql</code>.</li>
+<li>Change rollout strategy semantics from <code>0104</code>.</li>
+<li>Change transport scheduler design from <code>0083</code>.</li>
+<li>Preserve artifact-handle-owned fallback semantics long term.</li>
+<li>Auto-infer collective topology from ambient process state in the generic SDK.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<pre class="mermaid"><code>flowchart LR
+  A["ArtifactSelection&lt;br&gt;which artifact/view/subset"] --&gt; E["Materialization request"]
+  B["StorePolicy&lt;br&gt;durability and placement"] --&gt; F["Registration and persistence"]
+  C["RetrievalPolicy&lt;br&gt;eligible sources and ordering"] --&gt; E
+  D["ExecutionTopologyContext&lt;br&gt;collective group + source sharing + locality"] --&gt; E
+  G["RealizationStrategy&lt;br&gt;rollout source lifetime"] --&gt; H["Rollout and worker realization"]
+  E --&gt; I["Daemon single request normalizer"]
+  I --&gt; J["Core structured source hints&lt;br&gt;preference plus allow flags"]
+  I --&gt; K["Core execution topology facts&lt;br&gt;group + locality + sharing"]</code></pre>
+<h2 id="plane-boundaries">Plane Boundaries<a class="headerlink" href="#plane-boundaries" title="Permanent link">&para;</a></h2>
+<p>Normative rules:</p>
+<ol>
+<li><code>ArtifactSelection</code> owns artifact/view/subset identity only.</li>
+<li><code>StorePolicy</code> owns durability and placement outcomes only.</li>
+<li>Retrieval policy owns source-category eligibility and ordering during
+   materialization only.</li>
+<li>Execution topology context owns participant/group, source-sharing, and
+   locality context for executor selection only.</li>
+<li>Rollout strategy owns source-side issuance and worker-realization behavior
+   only.</li>
+<li>No public field name may represent more than one of those planes.</li>
+</ol>
+<h2 id="decision-set">Decision Set<a class="headerlink" href="#decision-set" title="Permanent link">&para;</a></h2>
+<ul>
+<li>D1: retrieval policy is execution-scoped, not artifact-handle-scoped.</li>
+<li>D2: public retrieval preset names must not define the wire contract.</li>
+<li>D3: transport requests carry one structured source-policy field only for
+  retrieval policy.</li>
+<li>D4: replica, target, mapped-target, and owned-binding flows share one daemon
+  normalization path.</li>
+<li>D5: core keeps structured source hints as the canonical execution form.</li>
+<li>D6: artifact-handle serialization must not persist retrieval policy in the
+  target state.</li>
+<li>D7: <code>source_mode</code> is not used for retrieval public APIs.</li>
+<li>D8: collective topology and source-sharing context are modeled separately from
+  retrieval policy.</li>
+<li>D9: daemon normalization must produce one internal request context with
+  retrieval policy and execution topology as separate fields before core
+  strategy planning begins.</li>
+</ul>
+<h2 id="canonical-retrieval-policy-model">Canonical Retrieval Policy Model<a class="headerlink" href="#canonical-retrieval-policy-model" title="Permanent link">&para;</a></h2>
+<p>Target-state canonical policy:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">SourcePreference</span><span class="p">(</span><span class="n">StrEnum</span><span class="p">):</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    <span class="n">AUTO</span> <span class="o">=</span> <span class="s2">"auto"</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">PREFER_P2P</span> <span class="o">=</span> <span class="s2">"prefer_p2p"</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">PREFER_DISK</span> <span class="o">=</span> <span class="s2">"prefer_disk"</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">RetrievalPolicy</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="n">preference</span><span class="p">:</span> <span class="n">SourcePreference</span> <span class="o">=</span> <span class="n">SourcePreference</span><span class="o">.</span><span class="n">AUTO</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">allow_p2p</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">allow_disk</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span></code></pre></div>
+<p>This is the canonical semantic form across SDK normalization, transport, daemon
+resolution, and core execution.</p>
+<p>Why this form is canonical:</p>
+<ul>
+<li>it matches current engine/orchestrator execution semantics</li>
+<li>it can represent compatibility-only shapes without inventing fake public modes</li>
+<li>it keeps <code>p2p_only</code> and <code>p2p_preferred</code> representable internally during
+  migration</li>
+</ul>
+<h2 id="public-preset-sugar">Public Preset Sugar<a class="headerlink" href="#public-preset-sugar" title="Permanent link">&para;</a></h2>
+<p>Public sugar may be smaller than the canonical form.</p>
+<p>Recommended first-class presets:</p>
+<table>
+<thead>
+<tr>
+<th>Preset</th>
+<th>Canonical lowering</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>auto</code></td>
+<td><code>preference=auto</code>, <code>allow_p2p=true</code>, <code>allow_disk=true</code></td>
+</tr>
+<tr>
+<td><code>local_only</code></td>
+<td><code>preference=auto</code>, <code>allow_p2p=false</code>, <code>allow_disk=false</code></td>
+</tr>
+<tr>
+<td><code>disk_first</code></td>
+<td><code>preference=prefer_disk</code>, <code>allow_p2p=true</code>, <code>allow_disk=true</code></td>
+</tr>
+<tr>
+<td><code>disk_only</code></td>
+<td><code>preference=prefer_disk</code>, <code>allow_p2p=false</code>, <code>allow_disk=true</code></td>
+</tr>
+</tbody>
+</table>
+<p>Important rule:</p>
+<ul>
+<li>public presets are convenience syntax only</li>
+<li>transport and core must still normalize to structured <code>RetrievalPolicy</code></li>
+</ul>
+<p>Compatibility implication:</p>
+<ul>
+<li>internal and transitional code may still need <code>p2p_preferred</code> or <code>p2p_only</code>
+  shaped policies</li>
+<li>those are represented through the canonical structured form, not through extra
+  public preset names</li>
+</ul>
+<h2 id="canonical-execution-topology-context-model">Canonical Execution Topology Context Model<a class="headerlink" href="#canonical-execution-topology-context-model" title="Permanent link">&para;</a></h2>
+<p>Target-state topology context is distinct from retrieval policy:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">SourceLocalityHint</span><span class="p">(</span><span class="n">StrEnum</span><span class="p">):</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>    <span class="n">AUTO</span> <span class="o">=</span> <span class="s2">"auto"</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>    <span class="n">HOST_LOCAL</span> <span class="o">=</span> <span class="s2">"host_local"</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>    <span class="n">SHARED_SOURCE</span> <span class="o">=</span> <span class="s2">"shared_source"</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">class</span><span class="w"> </span><span class="nc">ExecutionTopologyContext</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>    <span class="n">collective_group</span><span class="p">:</span> <span class="n">CollectiveLoadGroup</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>    <span class="n">source_locality</span><span class="p">:</span> <span class="n">SourceLocalityHint</span> <span class="o">=</span> <span class="n">SourceLocalityHint</span><span class="o">.</span><span class="n">AUTO</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>    <span class="n">source_sharing_domain</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<p>This context is intentionally separate because it answers different questions:</p>
+<ul>
+<li>should ranks coordinate,</li>
+<li>do they see the same backing source media,</li>
+<li>and which locality assumptions are safe for the strategy plane to use.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>topology context is execution-scoped, not artifact-handle-scoped,</li>
+<li>topology context is not part of <code>RetrievalPolicy</code>,</li>
+<li>topology context is not part of <code>ArtifactSelection</code>,</li>
+<li>generic SDK paths must not infer topology from ambient process state,</li>
+<li>integrations with explicit TP knowledge may synthesize topology context.</li>
+</ul>
+<h2 id="canonical-daemon-normalization-boundary">Canonical Daemon Normalization Boundary<a class="headerlink" href="#canonical-daemon-normalization-boundary" title="Permanent link">&para;</a></h2>
+<p>The daemon/core boundary needs one internal-only normalized request family:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">NormalizedMaterializationRequestContext</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="n">RetrievalPolicy</span><span class="w"> </span><span class="n">retrieval_policy</span><span class="p">;</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="n">ExecutionTopologyContext</span><span class="w"> </span><span class="n">execution_topology</span><span class="p">;</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&gt;</span><span class="w"> </span><span class="n">replica_uuid</span><span class="p">;</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">verify_checksums</span><span class="p">{</span><span class="nb">true</span><span class="p">};</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">  </span><span class="kt">int32_t</span><span class="w"> </span><span class="n">wait_for_shared_disk_ms</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>This object is not a new public SDK or proto contract. It is the internal
+normalization target that all retrieval-related RPCs must lower into before
+materialization orchestration or strategy planning begins.</p>
+<p>Normative rules:</p>
+<ul>
+<li>replica, target, mapped-target, and owned-binding RPCs all lower into one
+  normalized internal request context,</li>
+<li>legacy request-level <code>preference</code> may exist only as compatibility input to the
+  normalizer and must not survive as a second canonical field,</li>
+<li>execution topology facts remain separate from retrieval policy inside that
+  normalized object,</li>
+<li>executor-private planning hints do not belong in this boundary.</li>
+</ul>
+<h2 id="sdk-surface-target-state">SDK Surface Target State<a class="headerlink" href="#sdk-surface-target-state" title="Permanent link">&para;</a></h2>
+<p>Retrieval policy moves to execution-time options.</p>
+<p>Recommended target state:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">RetrievalPreset</span><span class="p">(</span><span class="n">StrEnum</span><span class="p">):</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">AUTO</span> <span class="o">=</span> <span class="s2">"auto"</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">LOCAL_ONLY</span> <span class="o">=</span> <span class="s2">"local_only"</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">DISK_FIRST</span> <span class="o">=</span> <span class="s2">"disk_first"</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">DISK_ONLY</span> <span class="o">=</span> <span class="s2">"disk_only"</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="k">class</span><span class="w"> </span><span class="nc">GetArtifactOptions</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>    <span class="n">source</span><span class="p">:</span> <span class="n">RetrievalPolicy</span> <span class="o">|</span> <span class="n">RetrievalPreset</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>    <span class="n">execution_topology</span><span class="p">:</span> <span class="n">ExecutionTopologyContext</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>    <span class="n">replica_uuid</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>    <span class="n">verify_checksums</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>    <span class="n">enable_verification</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-3-14"><a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>    <span class="n">wait_for_shared_disk_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span>
+</span><span id="__span-3-15"><a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>    <span class="n">wait_for_completion</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+</span><span id="__span-3-16"><a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>    <span class="n">region_backed_mode</span><span class="p">:</span> <span class="n">RegionBackedMode</span> <span class="o">=</span> <span class="n">RegionBackedMode</span><span class="o">.</span><span class="n">AUTO</span>
+</span><span id="__span-3-17"><a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>    <span class="n">pinned_allocation_timeout_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="n">DEFAULT_PINNED_TIMEOUT_MS</span>
+</span><span id="__span-3-18"><a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>    <span class="n">transport_hold_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>source selection belongs in <code>GetArtifactOptions</code> or an execution-scoped
+   equivalent, not in <code>Artifact</code>.</li>
+<li>execution topology belongs in execution-scoped options, not in <code>Artifact</code>.</li>
+<li><code>replica_uuid</code> reuse hint is execution-scoped.</li>
+<li>disk verification choice is execution-scoped.</li>
+<li><code>FallbackOptions</code> is compatibility-only and is removed after migration.</li>
+<li>string shortcuts such as <code>fallback="disk"</code> are compatibility-only and are
+   removed after migration.</li>
+</ol>
+<p>Store-level defaults:</p>
+<ul>
+<li>if process-wide defaults are retained, they must lower into the same
+  execution-scoped retrieval helper</li>
+<li>they must not restore artifact-handle ownership of retrieval policy</li>
+</ul>
+<h2 id="artifact-handle-contract">Artifact Handle Contract<a class="headerlink" href="#artifact-handle-contract" title="Permanent link">&para;</a></h2>
+<p>Target-state <code>Artifact</code> owns:</p>
+<ul>
+<li>artifact identity</li>
+<li>selection identity</li>
+<li>cached metadata useful for selection and materialization</li>
+</ul>
+<p>Target-state <code>Artifact</code> does not own:</p>
+<ul>
+<li>retrieval source policy</li>
+<li>disk verification preference</li>
+<li>process-local fallback strings</li>
+</ul>
+<p>Required cleanup:</p>
+<ul>
+<li>remove <code>Artifact.with_fallback(...)</code></li>
+<li>remove retrieval-policy fields from <code>Artifact.to_dict()/from_dict()</code></li>
+<li>stop treating serialized handle state as a source-policy carrier</li>
+</ul>
+<h2 id="transport-contract">Transport Contract<a class="headerlink" href="#transport-contract" title="Permanent link">&para;</a></h2>
+<p>Target-state daemon transport keeps one field only:</p>
+<div class="language-proto highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="kd">message</span><span class="w"> </span><span class="nc">SourcePolicy</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="n">SourcePreference</span><span class="w"> </span><span class="na">preference</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span><span class="k">optional</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="na">allow_p2p</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span><span class="k">optional</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="na">allow_disk</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Target-state request rule:</p>
+<ul>
+<li>keep <code>source_policy</code></li>
+<li>keep topology context in a separate field family, currently
+  <code>collective_load_group</code> where collective execution is supported</li>
+<li>remove top-level request <code>preference</code></li>
+</ul>
+<p>This applies to:</p>
+<ul>
+<li><code>MaterializeReplicaRequest</code></li>
+<li><code>MaterializeIntoTargetRequest</code></li>
+<li><code>MaterializeIntoMappedTargetRequest</code></li>
+<li><code>CreateOwnedBindingRequest</code></li>
+<li><code>RefillOwnedBindingRequest</code></li>
+</ul>
+<p>Normative clarification:</p>
+<ul>
+<li><code>collective_load_group</code> is execution topology context, not retrieval policy,</li>
+<li>future protocol cleanup may normalize topology fields into an explicit
+  <code>ExecutionTopologyContext</code> message, but the architectural boundary is already
+  fixed now.</li>
+</ul>
+<h2 id="daemon-and-core-convergence">Daemon And Core Convergence<a class="headerlink" href="#daemon-and-core-convergence" title="Permanent link">&para;</a></h2>
+<p>One daemon normalization path must be shared across:</p>
+<ul>
+<li>replica materialization</li>
+<li>region-backed target materialization</li>
+<li>mapped target materialization</li>
+<li>owned binding create/refill</li>
+</ul>
+<p>Normalized output must lower to one core hint shape:</p>
+<ul>
+<li><code>SourcePreference</code></li>
+<li><code>allow_p2p</code></li>
+<li><code>allow_disk</code></li>
+</ul>
+<p>and one separate topology/context shape:</p>
+<ul>
+<li>collective group when present</li>
+<li>locality/source-sharing facts when present</li>
+</ul>
+<p>No per-RPC alternate state machines are allowed.</p>
+<h2 id="wait-for-shared-disk-contract">Wait-For-Shared-Disk Contract<a class="headerlink" href="#wait-for-shared-disk-contract" title="Permanent link">&para;</a></h2>
+<p><code>wait_for_shared_disk_ms</code> is execution policy and remains on
+<code>GetArtifactOptions</code>.</p>
+<p>Normative rule:</p>
+<ul>
+<li>the wait path is valid only when the effective retrieval policy allows disk</li>
+</ul>
+<p>The wait path may lower the retry attempt to a stricter disk-only structured
+policy, but that retry behavior is an execution detail derived from the
+canonical policy, not a second public surface.</p>
+<h1 id="invariants-and-error-model">Invariants And Error Model<a class="headerlink" href="#invariants-and-error-model" title="Permanent link">&para;</a></h1>
+<h2 id="invariants">Invariants<a class="headerlink" href="#invariants" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Retrieval requests carry one structured source-policy field only.</li>
+<li>Retrieval public naming must not reuse rollout <code>source_mode</code>.</li>
+<li>Artifact handles do not own retrieval policy in the target state.</li>
+<li>Replica/target/mapped-target/owned-binding flows share one daemon
+   normalization contract.</li>
+<li>Core execution consumes structured policy hints only.</li>
+<li>Public presets, when present, lower losslessly into structured canonical
+   retrieval policy.</li>
+<li>Collective topology and source-sharing context are never encoded as
+   retrieval policy.</li>
+</ol>
+<h2 id="error-model">Error Model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>INVALID_ARGUMENT</code></li>
+<li>invalid retrieval preset</li>
+<li>invalid structured source policy</li>
+<li>invalid compat combination during migration</li>
+<li><code>FAILED_PRECONDITION</code></li>
+<li>no eligible source category is usable in the current environment</li>
+<li><code>NOT_FOUND</code></li>
+<li>no eligible source instance exists for a strict policy</li>
+<li>source-specific runtime errors</li>
+<li>disk or P2P load failure from the selected eligible path</li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<table>
+<thead>
+<tr>
+<th>Proposed symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RetrievalPolicy</code></td>
+<td>Python/C++ class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RetrievalPreset</code></td>
+<td>Python enum</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>SourcePreference</code></td>
+<td>Python/proto enum</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>ExecutionTopologyContext</code></td>
+<td>Python/C++ class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>SourceLocalityHint</code></td>
+<td>Python enum</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>NormalizedMaterializationRequestContext</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>resolve_retrieval_policy_compat</code></td>
+<td>Python/C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>resolve_materialization_request_context</code></td>
+<td>Python/C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>source</code></td>
+<td>Python field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>execution_topology</code></td>
+<td>Python field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>SOURCE_PREFERENCE_PREFER_DISK</code></td>
+<td>proto constant</td>
+<td><code>ALL_CAPS</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>None. <code>schema.sql</code> is unchanged.</p>
+<h1 id="compatibility-and-migration">Compatibility And Migration<a class="headerlink" href="#compatibility-and-migration" title="Permanent link">&para;</a></h1>
+<p>Migration should be architectural, not cosmetic.</p>
+<h2 id="stage-1-freeze-the-internal-request-normalizer">Stage 1: Freeze The Internal Request Normalizer<a class="headerlink" href="#stage-1-freeze-the-internal-request-normalizer" title="Permanent link">&para;</a></h2>
+<ul>
+<li>add one shared daemon-side normalized request context for retrieval-related
+  flows,</li>
+<li>map legacy request <code>preference</code>, <code>source_policy</code>, and topology hints into that
+  internal contract,</li>
+<li>keep executor-private details out of the normalized boundary.</li>
+</ul>
+<h2 id="stage-2-single-policy-channel-and-separate-topology-context">Stage 2: Single Policy Channel And Separate Topology Context<a class="headerlink" href="#stage-2-single-policy-channel-and-separate-topology-context" title="Permanent link">&para;</a></h2>
+<ul>
+<li>remove request-level <code>preference</code> from the canonical transport model,</li>
+<li>keep only <code>source_policy</code> for retrieval policy,</li>
+<li>keep <code>collective_load_group</code> or a successor topology field outside
+  <code>source_policy</code>,</li>
+<li>make daemon normalization produce separate retrieval-policy and
+  execution-topology outputs.</li>
+</ul>
+<p>Sequencing rule:</p>
+<ul>
+<li>Stages 1 and 2 are the runtime-critical prerequisite for <code>0108</code> convergence
+  and for <code>0109</code> default-routing work.</li>
+</ul>
+<h2 id="stage-3-align-core-consumers-to-the-normalized-contract">Stage 3: Align Core Consumers To The Normalized Contract<a class="headerlink" href="#stage-3-align-core-consumers-to-the-normalized-contract" title="Permanent link">&para;</a></h2>
+<ul>
+<li>make orchestrator and ingestion facade consume the normalized contract rather
+  than re-deriving it from per-RPC inputs,</li>
+<li>keep wait-for-shared-disk retry behavior derived from canonical retrieval
+  policy, not from a second public state machine.</li>
+</ul>
+<h2 id="stage-4-execution-scope-sdk-migration">Stage 4: Execution-Scope SDK Migration<a class="headerlink" href="#stage-4-execution-scope-sdk-migration" title="Permanent link">&para;</a></h2>
+<ul>
+<li>add execution-scoped retrieval policy on <code>GetArtifactOptions</code> or equivalent,</li>
+<li>move <code>replica_uuid</code> and disk verification behavior into execution scope,</li>
+<li>complete the public cut without preserving <code>FallbackOptions</code> adapters in the
+  steady state.</li>
+</ul>
+<h2 id="stage-5-artifact-handle-cleanup-and-hard-cut">Stage 5: Artifact Handle Cleanup And Hard Cut<a class="headerlink" href="#stage-5-artifact-handle-cleanup-and-hard-cut" title="Permanent link">&para;</a></h2>
+<ul>
+<li>stop serializing retrieval policy on <code>Artifact</code>,</li>
+<li>remove <code>with_fallback(...)</code>,</li>
+<li>remove <code>FallbackOptions</code> and fallback string shortcuts,</li>
+<li>keep public preset sugar only if it still lowers into the same canonical
+  structured policy.</li>
+</ul>
+<p>Hard-cut rule:</p>
+<ul>
+<li>when the normalized request boundary and execution-scoped SDK path are proven,
+  temporary compatibility helpers, duplicate request fields, and artifact-owned
+  fallback state should be deleted rather than preserved behind flags.</li>
+</ul>
+<h2 id="user-migration-guide">User Migration Guide<a class="headerlink" href="#user-migration-guide" title="Permanent link">&para;</a></h2>
+<p>This section is the normative migration map for callers that still use the
+removed fallback surface.</p>
+<h3 id="migration-rules">Migration Rules<a class="headerlink" href="#migration-rules" title="Permanent link">&para;</a></h3>
+<ol>
+<li>Keep <code>Artifact</code> handles identity-only. Do not attach retrieval policy to the
+   handle.</li>
+<li>Pass retrieval/source behavior through <code>GetArtifactOptions(...)</code> at the
+   materialization call site, or set <code>StoreOptions(get=...)</code> once for process
+   defaults.</li>
+<li>Use <code>tensorcast.from_disk(path)</code> for explicit disk imports. Disk paths are
+   not part of retrieval policy anymore.</li>
+<li>Move <code>replica_uuid</code> and <code>verify_checksums</code> into <code>GetArtifactOptions</code>; they
+   are execution-scoped, not fallback-owned.</li>
+<li>Use structured <code>RetrievalPolicy(...)</code> whenever you need <code>prefer_p2p</code> or
+   explicit allow-flag control. Public presets are only convenience sugar.</li>
+</ol>
+<h3 id="old-to-new-surface-map">Old To New Surface Map<a class="headerlink" href="#old-to-new-surface-map" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Old surface</th>
+<th>New surface</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>StoreOptions(fallback="local")</code></td>
+<td><code>StoreOptions(get=GetArtifactOptions(source="local_only"))</code></td>
+</tr>
+<tr>
+<td><code>StoreOptions(fallback="disk")</code></td>
+<td><code>StoreOptions(get=GetArtifactOptions(source="disk_first"))</code></td>
+</tr>
+<tr>
+<td><code>fallback="local"</code> on a read call</td>
+<td><code>options=GetArtifactOptions(source="local_only")</code></td>
+</tr>
+<tr>
+<td><code>fallback="disk"</code> on a read call</td>
+<td><code>options=GetArtifactOptions(source="disk_first")</code></td>
+</tr>
+<tr>
+<td><code>FallbackOptions(prefer="p2p")</code></td>
+<td><code>GetArtifactOptions(source=RetrievalPolicy(preference="prefer_p2p"))</code></td>
+</tr>
+<tr>
+<td><code>FallbackOptions(prefer="disk", allow_p2p=False)</code></td>
+<td><code>GetArtifactOptions(source="disk_only")</code></td>
+</tr>
+<tr>
+<td><code>FallbackOptions(prefer="local")</code></td>
+<td><code>GetArtifactOptions(source="local_only")</code></td>
+</tr>
+<tr>
+<td><code>FallbackOptions.for_disk(path)</code> or <code>fallback="disk:/path"</code></td>
+<td><code>handle = tensorcast.from_disk(path)</code></td>
+</tr>
+<tr>
+<td><code>Artifact.with_fallback(...)</code></td>
+<td>keep <code>Artifact</code> unchanged; pass <code>options=...</code> when calling <code>tensor_dict(...)</code>, <code>tensor_dict_into(...)</code>, <code>prefetch(...)</code>, or set <code>StoreOptions(get=...)</code></td>
+</tr>
+<tr>
+<td><code>Artifact.to_dict()/from_dict()</code> carrying fallback state</td>
+<td>no replacement; retrieval policy is not serialized on handles anymore</td>
+</tr>
+</tbody>
+</table>
+<h3 id="copy-paste-examples">Copy-Paste Examples<a class="headerlink" href="#copy-paste-examples" title="Permanent link">&para;</a></h3>
+<p>Prefer one-off execution-scoped retrieval policy:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">tensorcast</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">tc</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="n">handle</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">"model:latest"</span><span class="p">)</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="n">weights</span> <span class="o">=</span> <span class="n">handle</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">(</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    <span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    <span class="n">options</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">GetArtifactOptions</span><span class="p">(</span><span class="n">source</span><span class="o">=</span><span class="s2">"disk_first"</span><span class="p">),</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Set a process-wide default for all reads through one <code>Store</code>:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">tensorcast</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">tc</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">store</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">store</span><span class="p">(</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">opts</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">StoreOptions</span><span class="p">(</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>        <span class="n">get</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">GetArtifactOptions</span><span class="p">(</span><span class="n">source</span><span class="o">=</span><span class="s2">"local_only"</span><span class="p">),</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="p">)</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="p">)</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="n">handle</span> <span class="o">=</span> <span class="n">store</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">key</span><span class="o">=</span><span class="s2">"model:latest"</span><span class="p">)</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="n">weights</span> <span class="o">=</span> <span class="n">handle</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">(</span><span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Use structured policy when you need <code>prefer_p2p</code> or explicit gating:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">tensorcast</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">tc</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">handle</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">artifact</span><span class="p">(</span><span class="n">artifact_id</span><span class="o">=</span><span class="s2">"mi2:..."</span><span class="p">)</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">weights</span> <span class="o">=</span> <span class="n">handle</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">(</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>    <span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="n">options</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">GetArtifactOptions</span><span class="p">(</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>        <span class="n">source</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">RetrievalPolicy</span><span class="p">(</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>            <span class="n">preference</span><span class="o">=</span><span class="s2">"prefer_p2p"</span><span class="p">,</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>            <span class="n">allow_p2p</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a>            <span class="n">allow_disk</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>        <span class="p">),</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a>        <span class="n">replica_uuid</span><span class="o">=</span><span class="s2">"prefetched-replica-uuid"</span><span class="p">,</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>        <span class="n">verify_checksums</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+</span><span id="__span-7-14"><a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a>    <span class="p">),</span>
+</span><span id="__span-7-15"><a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="p">)</span>
+</span></code></pre></div>
+<p>Use explicit disk import instead of path-shaped fallback:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">tensorcast</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">tc</span>
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">handle</span> <span class="o">=</span> <span class="n">tc</span><span class="o">.</span><span class="n">from_disk</span><span class="p">(</span><span class="s2">"/shared/tensorcast/models/model_a"</span><span class="p">)</span>
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">weights</span> <span class="o">=</span> <span class="n">handle</span><span class="o">.</span><span class="n">tensor_dict</span><span class="p">(</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a>    <span class="n">device</span><span class="o">=</span><span class="s2">"cuda:0"</span><span class="p">,</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a>    <span class="n">options</span><span class="o">=</span><span class="n">tc</span><span class="o">.</span><span class="n">GetArtifactOptions</span><span class="p">(</span><span class="n">source</span><span class="o">=</span><span class="s2">"disk_first"</span><span class="p">),</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="p">)</span>
+</span></code></pre></div>
+<h1 id="alternatives-and-rationale">Alternatives And Rationale<a class="headerlink" href="#alternatives-and-rationale" title="Permanent link">&para;</a></h1>
+<p>Alternative A: keep <code>0080</code> and rename fields around a four-value <code>source_mode</code>.</p>
+<ul>
+<li>Rejected because it preserves the wrong plane boundary and collides with
+  rollout terminology from <code>0104</code>.</li>
+</ul>
+<p>Alternative B: keep current structured transport but continue owning retrieval
+policy on <code>Artifact</code>.</p>
+<ul>
+<li>Rejected because retrieval policy remains serialized and identity-adjacent,
+  which conflicts with the selection-first direction from <code>0078</code>.</li>
+</ul>
+<p>Alternative C: collapse everything into <code>StorePolicy</code>.</p>
+<ul>
+<li>Rejected because registration durability/placement and retrieval source choice
+  are different state machines with different timing and failure semantics.</li>
+</ul>
+<p>Chosen approach:</p>
+<ul>
+<li>separate retrieval policy into its own execution-time plane</li>
+<li>keep structured policy canonical</li>
+<li>keep public presets as optional sugar only</li>
+</ul>
+<h1 id="trade-offs-and-risks">Trade-offs And Risks<a class="headerlink" href="#trade-offs-and-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>This is a larger doc and migration than the narrower <code>0080</code> proposal.</li>
+<li>SDK migration touches public Python surface, serialization, and tests.</li>
+<li>Some callers currently rely on artifact-level fallback cloning and will need
+  migration.</li>
+<li>Short-term compatibility logic may remain necessary for legacy p2p-shaped
+  inputs during ordered migration only.</li>
+</ul>
+<p>Mitigations:</p>
+<ul>
+<li>introduce one shared compatibility helper first</li>
+<li>migrate daemon and binding transport before removing SDK adapters</li>
+<li>keep the canonical transport structured so compatibility states do not distort
+  the final model</li>
+<li>delete compatibility helpers and duplicate fallback ownership in the hard-cut
+  phase instead of preserving them as stable abstraction layers</li>
+</ul>
+<h1 id="acceptance-criteria">Acceptance Criteria<a class="headerlink" href="#acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ol>
+<li>Retrieval public semantics no longer use the name <code>source_mode</code>.</li>
+<li>Retrieval policy is execution-scoped rather than artifact-handle-scoped.</li>
+<li>Collective topology context is execution-scoped and is not modeled as
+   retrieval policy.</li>
+<li>Materialization and owned-binding requests carry only <code>source_policy</code> for
+   retrieval policy, not a second top-level <code>preference</code>.</li>
+<li>Replica, target, mapped-target, and owned-binding flows share one daemon
+   normalization path.</li>
+<li>Core execution continues to consume structured hints
+   (<code>preference</code> plus <code>allow_*</code>) as the canonical form.</li>
+<li><code>Artifact.to_dict()/from_dict()</code> no longer persists retrieval policy in the
+   target state.</li>
+<li><code>FallbackOptions</code> is removed after migration.</li>
+<li>Compatibility-only request merge paths and artifact-owned fallback helpers do
+   not survive as steady-state architecture.</li>
+</ol>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>docs/designs/0071-managed-shared-disk-persistence.md</code></li>
+<li><code>docs/designs/0078-selection-first-artifact-retrieval.md</code></li>
+<li><code>docs/designs/0084-binding-unified-model-and-contract.md</code></li>
+<li><code>docs/designs/0108-tensor-aware-materialization-strategy-plane.md</code></li>
+<li><code>docs/designs/0109-batched-owner-file-collective-executor.md</code></li>
+<li><code>docs/designs/0112-binding-native-serving-realization-and-publication.md</code></li>
+<li><code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code></li>
+<li><code>docs/designs/0104-artifact-realization-and-cluster-rollout.md</code></li>
+<li><code>docs/architecture/api/api-design.md</code></li>
+<li><code>docs/architecture/api/materialization-flow.md</code></li>
+<li><code>docs/architecture/api/policy-persistence.md</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

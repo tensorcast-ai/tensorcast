@@ -1,0 +1,2797 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0085-distributed-binding-assembly-and-coordinator/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Distributed Binding Assembly on the Existing Assembly and Layout Trunk - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Distributed Binding Assembly on the Existing Assembly and Layout Trunk
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Define distributed binding-backed publish by reusing the repository's existing
+assembly and layout trunk.</p>
+<p><code>0085</code> is the parent thesis only.
+It is not the executable attempt-carrier specification.</p>
+<p>Its job is to lock the repository-wide invariants that must remain true:</p>
+<ul>
+<li>one structural assembly trunk,</li>
+<li>one frontend-agnostic attempt domain above that trunk,</li>
+<li>one workflow and closeout line above immutable attempt truth,</li>
+<li>and one binding frontend that lowers onto the same trunk instead of inventing
+  a second publish implementation.</li>
+</ul>
+<p><code>0105</code> owns the executable attempt model.
+<code>0085</code> owns the parent-level rules that child designs must not violate.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Publish one full distributed model version from many local sealed values.</li>
+<li>Keep <code>LayoutSpec</code> as the canonical structural layout and overlap or proof
+  contract.</li>
+<li>Reuse the existing structural assembly substrate:</li>
+<li><code>LayoutSpec</code></li>
+<li>one assembly workspace trunk</li>
+<li>deterministic <code>view_id</code></li>
+<li>coverage and proof persistence</li>
+<li><code>artifact_bindings</code></li>
+<li>the existing structural seal substrate</li>
+<li>Keep binding-backed contribution as one frontend onto the existing structural
+  registration and seal path.</li>
+<li>Keep semantic kernels separated so the same question never has two competing
+  authority roots.</li>
+<li>Preserve a clean extension path for planners, future frontend families, and
+  richer closeout scopes without creating a second assembly implementation.</li>
+<li>Keep SDK control-path operations daemon-mediated only.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine the local binding contract from <code>0084</code>.</li>
+<li>Redefine repository-wide distributed continuation rules from <code>0100</code>.</li>
+<li>Redefine lifecycle semantics from <code>0011</code> or <code>0094</code>.</li>
+<li>Widen <code>LayoutSpec</code> with frontend topology, workflow, or closeout metadata.</li>
+<li>Introduce a second persistent assembly implementation.</li>
+<li>Promise <code>TP &gt; 1</code> assembly semantics in this phase.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The repository already contains the structural substrate we want:</p>
+<ul>
+<li><code>LayoutSpec</code> is content-addressed and layout-scoped,</li>
+<li><code>ViewSpec</code> canonically maps to deterministic <code>view_id</code>,</li>
+<li>structural registration persists facts through <code>view_state_service</code>,</li>
+<li>the structural seal path already exists,</li>
+<li>and <code>artifact_bindings</code> already make sealed lineage authoritative.</li>
+</ul>
+<p>The historical inconsistency was not the trunk.
+It was the join points around the trunk.</p>
+<p>Previous drafts and partial implementations blurred:</p>
+<ol>
+<li>requirement truth and binding-local lowering shape,</li>
+<li>requirement identity and readiness policy,</li>
+<li>attempt identity and structural workspace identity,</li>
+<li>durable attempt truth and workflow snapshots,</li>
+<li>workflow observation and workflow transition,</li>
+<li>source seal completion and final published success,</li>
+<li>public continuation metadata and bare internal ids.</li>
+</ol>
+<p>That blurring is the real design bug.</p>
+<h1 id="repository-alignment">Repository Alignment<a class="headerlink" href="#repository-alignment" title="Permanent link">&para;</a></h1>
+<p><code>0085</code> must be read under four repository-wide rules that are already owned
+elsewhere.</p>
+<h2 id="one-authority-root-per-question">One authority root per question<a class="headerlink" href="#one-authority-root-per-question" title="Permanent link">&para;</a></h2>
+<p><code>0092</code> and <code>0090</code> established the repository rule that different questions must
+have different authority roots.</p>
+<p>For this domain:</p>
+<ul>
+<li>structural layout truth belongs to <code>LayoutSpec</code>,</li>
+<li>structural target truth belongs to <code>ViewSpec</code> plus deterministic <code>view_id</code>,</li>
+<li>requirement truth belongs to the canonical requirement kernel,</li>
+<li>readiness-policy truth belongs to a separate readiness-policy kernel,</li>
+<li>closeout-contract truth belongs to a separate closeout-contract kernel,</li>
+<li>immutable per-attempt truth belongs to an immutable attempt record,</li>
+<li>workflow currentness belongs to the coordinator operation runtime,</li>
+<li>live occupancy belongs to durable slot occupancy plus lifecycle-backed
+  liveness,</li>
+<li>closeout result truth belongs to the final published lineage.</li>
+</ul>
+<p>No row, proto, or helper may silently answer more than one of those questions by
+accident.</p>
+<h2 id="lifecycle-is-not-workflow-truth">Lifecycle is not workflow truth<a class="headerlink" href="#lifecycle-is-not-workflow-truth" title="Permanent link">&para;</a></h2>
+<p><code>0094</code> and <code>0011</code> established that lifecycle protects bounded runtime promises.
+It does not own workflow truth.</p>
+<p>Therefore:</p>
+<ul>
+<li>leases and keepalives may protect live contributions,</li>
+<li>finalizers may accelerate cleanup,</li>
+<li>but lifecycle state does not replace requirement truth,</li>
+<li>does not replace readiness policy,</li>
+<li>and does not replace coordinator workflow truth.</li>
+</ul>
+<h2 id="workflow-semantics-stay-above-lifecycle">Workflow semantics stay above lifecycle<a class="headerlink" href="#workflow-semantics-stay-above-lifecycle" title="Permanent link">&para;</a></h2>
+<p><code>0096</code> established that replay, wait, currentness, fencing, and completion are
+workflow semantics.</p>
+<p>Therefore:</p>
+<ul>
+<li>mutation fences may be derived from live slot occupancy,</li>
+<li>explicit transition APIs advance attempt workflow,</li>
+<li>observation APIs report workflow state,</li>
+<li>and <code>wait</code> must not become an implicit transition helper.</li>
+</ul>
+<h2 id="public-continuation-follows-0100">Public continuation follows <code>0100</code><a class="headerlink" href="#public-continuation-follows-0100" title="Permanent link">&para;</a></h2>
+<p><code>0100</code> established that public continuation must converge on <code>Operation[T]</code> or
+another explicit public family surface.</p>
+<p>Therefore:</p>
+<ul>
+<li>assembly attempts may not define a private continuation dialect,</li>
+<li>public reentry must carry durable attempt scope,</li>
+<li>and child designs must not weaken the continuation contract merely because the
+  attempt path began life as a local daemon workflow.</li>
+</ul>
+<h1 id="architectural-thesis">Architectural Thesis<a class="headerlink" href="#architectural-thesis" title="Permanent link">&para;</a></h1>
+<h2 id="hard-parent-child-split">Hard Parent-Child Split<a class="headerlink" href="#hard-parent-child-split" title="Permanent link">&para;</a></h2>
+<p>The repository needs both a parent thesis and an executable hard cut.
+They answer different questions.</p>
+<table>
+<thead>
+<tr>
+<th>Design</th>
+<th>Owns</th>
+<th>Must not own</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0085</code></td>
+<td>one-trunk thesis, semantic-kernel separation, frontend-agnostic lowering rules, parent invariants, high-level success model</td>
+<td>concrete proto carriers, public continuation payloads, exact runtime or durable-row schema</td>
+</tr>
+<tr>
+<td><code>0105</code></td>
+<td>executable attempt carriers, public attempt surface, durable attempt-row direction, readiness-cut shape, continuation metadata</td>
+<td>second structural trunk, alternative layout root, alternate lifecycle system</td>
+</tr>
+</tbody>
+</table>
+<h2 id="one-structural-trunk-multiple-semantic-kernels">One Structural Trunk, Multiple Semantic Kernels<a class="headerlink" href="#one-structural-trunk-multiple-semantic-kernels" title="Permanent link">&para;</a></h2>
+<p>The parent design should be read through the following table.</p>
+<table>
+<thead>
+<tr>
+<th>Semantic kernel</th>
+<th>Carrier family</th>
+<th>Authoritative question answered</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Structural layout kernel</td>
+<td><code>LayoutSpec</code></td>
+<td>what canonical structure must final bytes satisfy</td>
+</tr>
+<tr>
+<td>Structural target kernel</td>
+<td><code>ViewSpec</code> plus deterministic <code>view_id</code></td>
+<td>which structural projection is being addressed</td>
+</tr>
+<tr>
+<td>Requirement kernel</td>
+<td>canonical requirement-set contract</td>
+<td>which requirements must be satisfied for this attempt</td>
+</tr>
+<tr>
+<td>Readiness-policy kernel</td>
+<td>explicit readiness-policy contract</td>
+<td>what liveness facts must still hold at transition time</td>
+</tr>
+<tr>
+<td>Closeout-contract kernel</td>
+<td>typed closeout contract</td>
+<td>what success boundary must final closeout satisfy</td>
+</tr>
+<tr>
+<td>Attempt instance kernel</td>
+<td>immutable attempt record</td>
+<td>which immutable attempt instance exists</td>
+</tr>
+<tr>
+<td>Workflow fence kernel</td>
+<td>coordinator operation runtime</td>
+<td>who is currently allowed to accept contributions and transition to seal</td>
+</tr>
+<tr>
+<td>Occupancy kernel</td>
+<td>durable slot occupancy plus lifecycle-backed liveness</td>
+<td>which contributor currently occupies one required slot</td>
+</tr>
+<tr>
+<td>Mutation-fence kernel</td>
+<td>live occupancies pointing at contributor-value identity</td>
+<td>may this local sealed value become mutable again</td>
+</tr>
+<tr>
+<td>Assembly workspace kernel</td>
+<td>structural workspace id</td>
+<td>where unsealed structural bytes are accumulated</td>
+</tr>
+<tr>
+<td>Closeout result kernel</td>
+<td><code>PublishedModelVersion</code> lineage</td>
+<td>what externally visible result did the attempt produce</td>
+</tr>
+</tbody>
+</table>
+<p>No kernel replaces another.</p>
+<h2 id="structural-kernel">Structural Kernel<a class="headerlink" href="#structural-kernel" title="Permanent link">&para;</a></h2>
+<p><code>LayoutSpec</code> remains narrow but deep.
+It continues to own:</p>
+<ul>
+<li>canonical index binding,</li>
+<li>overlap policy,</li>
+<li>proof policy,</li>
+<li>and reusable structural target semantics.</li>
+</ul>
+<p>It must not absorb:</p>
+<ul>
+<li>binding identity,</li>
+<li>slot occupancy,</li>
+<li>attempt workflow state,</li>
+<li>or attempt closeout policy.</li>
+</ul>
+<h2 id="requirement-kernel">Requirement Kernel<a class="headerlink" href="#requirement-kernel" title="Permanent link">&para;</a></h2>
+<p>The authoritative attempt root is not <code>LayoutSpec.expected_view_ids</code>.
+It is the frontend-agnostic requirement kernel that <code>0105</code> defines.</p>
+<p>Parent-level rules:</p>
+<ul>
+<li>attempt completeness is checked against explicit canonical requirements,</li>
+<li>frontend-specific planner or binding state must canonicalize once into that
+  requirement kernel before attempt creation completes,</li>
+<li><code>LayoutSpec.expected_view_ids</code> may seed one frontend bridge but must not remain
+  canonical attempt truth after the attempt exists,</li>
+<li><code>canonical_full</code>-style semantics prove that not every requirement is naturally
+  a structural <code>view_id</code>,</li>
+<li>no controller may rebuild a weaker substitute requirement set from layout hints
+  after the attempt exists.</li>
+</ul>
+<h3 id="exact-phase-1-contract-family-mapping">Exact Phase-1 Contract-Family Mapping<a class="headerlink" href="#exact-phase-1-contract-family-mapping" title="Permanent link">&para;</a></h3>
+<p>The current dependency-ready wave has one exact phase-1 mapping.
+This mapping is canonical repository behavior, not a planner convention.</p>
+<p>Canonicalization rule before digesting or attempt creation:</p>
+<ul>
+<li>drop empty structural view ids,</li>
+<li>deduplicate,</li>
+<li>sort lexicographically,</li>
+<li>and then emit inline requirements in that canonical order.</li>
+</ul>
+<p>Exact family mapping:</p>
+<table>
+<thead>
+<tr>
+<th>Family</th>
+<th>Canonical requirement entries</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PP</code></td>
+<td>one entry per canonicalized structural view id with <code>slot_id = structural_view_id</code>, <code>target.kind = structural_view</code>, <code>target.structural_view_id = structural_view_id</code>, <code>coverage_contract = "pp_structural_view"</code></td>
+<td><code>LayoutSpec.expected_view_ids</code> may seed this family for layout-shaped dependency-ready bridges, but only before attempt creation</td>
+</tr>
+<tr>
+<td><code>EP</code></td>
+<td>one entry per canonicalized structural view id with <code>slot_id = structural_view_id</code>, <code>target.kind = structural_view</code>, <code>target.structural_view_id = structural_view_id</code>, <code>coverage_contract = "ep_structural_view"</code></td>
+<td>planner-owned expert placement must lower to deterministic structural view ids before attempt creation</td>
+</tr>
+<tr>
+<td><code>canonical_full</code></td>
+<td>exactly one entry with <code>slot_id = "__canonical_full__"</code>, <code>target.kind = canonical_layout</code>, and <code>coverage_contract = "canonical_full"</code></td>
+<td>single-rank publish stays legal here and does not masquerade as a full-coverage piece</td>
+</tr>
+</tbody>
+</table>
+<p>Contribution-time slot identity follows the same canonical mapping:</p>
+<ul>
+<li><code>piece_partial</code> occupies the requirement whose <code>slot_id</code> equals the committed
+  structural <code>view_id</code>,</li>
+<li><code>canonical_full</code> occupies the single <code>__canonical_full__</code> slot,</li>
+<li>and seal consumes the snapped requirement set plus accepted occupancies rather
+  than rebuilding slots from layout hints.</li>
+</ul>
+<p><code>TP &gt; 1</code> stays explicitly out of scope for this phase.
+No frontend may invent a separate dependency-ready carrier that weakens the table above.</p>
+<h2 id="binding-frontend-reuses-the-structural-registration-trunk">Binding Frontend Reuses The Structural Registration Trunk<a class="headerlink" href="#binding-frontend-reuses-the-structural-registration-trunk" title="Permanent link">&para;</a></h2>
+<p><code>SealedBindingValue</code> from <code>0084</code> becomes one frontend onto the existing
+structural registration trunk.</p>
+<p>It must not bypass:</p>
+<ul>
+<li>deterministic structural identity computation,</li>
+<li>coverage validation,</li>
+<li>overlap and proof checks,</li>
+<li><code>view_state_service</code>,</li>
+<li>or the existing structural seal substrate.</li>
+</ul>
+<p>The binding bridge may still use binding-local carriers such as:</p>
+<ul>
+<li>contribution kind,</li>
+<li>coverage-plan hash,</li>
+<li>or binding-local slot metadata.</li>
+</ul>
+<p>But parent rule:</p>
+<ul>
+<li>those bridge-local carriers are not the canonical attempt kernel.</li>
+<li>and frontend code must not own the final structural lowering for one
+  attempt-scoped contribution.</li>
+</ul>
+<p>This is how "one trunk" should be interpreted.
+The shared trunk is the structural commit and seal substrate, not one overloaded
+submit carrier.</p>
+<h2 id="workflow-readiness-and-closeout-boundary">Workflow, Readiness, And Closeout Boundary<a class="headerlink" href="#workflow-readiness-and-closeout-boundary" title="Permanent link">&para;</a></h2>
+<p>Parent-level ordering rule:</p>
+<ol>
+<li>one immutable attempt record is created before contributors are accepted,</li>
+<li>contributors may submit only while the attempt is open,</li>
+<li>explicit transition APIs advance the attempt from open to sealing,</li>
+<li>the system captures one readiness cut before structural seal begins,</li>
+<li>structural seal consumes that captured cut,</li>
+<li>closeout consumes the seal result and produces final published lineage.</li>
+</ol>
+<p>That ordering is required even though the concrete runtime and snapshot carriers
+are owned by <code>0105</code>.</p>
+<h2 id="pre-attempt-closeout-profile-boundary">Pre-Attempt Closeout Profile Boundary<a class="headerlink" href="#pre-attempt-closeout-profile-boundary" title="Permanent link">&para;</a></h2>
+<p>Mutable closeout-profile configuration, if it exists at all, is a pre-attempt
+input, not attempt truth.</p>
+<p>Parent-level rules:</p>
+<ul>
+<li>mutable profile sources must be keyed by a pre-attempt scope visible before the
+  attempt exists,</li>
+<li>post-start workspace identity must not remain the sole lookup key for
+  pre-attempt closeout semantics,</li>
+<li>once the attempt exists, the snapped closeout contract is authoritative.</li>
+</ul>
+<h2 id="parent-level-public-surface-direction">Parent-Level Public Surface Direction<a class="headerlink" href="#parent-level-public-surface-direction" title="Permanent link">&para;</a></h2>
+<p><code>0085</code> does not define concrete public carriers.
+That is owned by <code>0105</code>.</p>
+<p>The parent-level API direction remains:</p>
+<ul>
+<li>callers use an explicit assembly-attempt surface,</li>
+<li>binding-backed contribution stays on <code>SealedBindingValue</code>,</li>
+<li>attempt transition is explicit,</li>
+<li>wait and status are observation only,</li>
+<li>final success returns published lineage rather than a bare source artifact,</li>
+<li>the current dependency-ready closeout wave returns real source lineage only,
+  with serving lineage remaining absent until typed child closeout contracts
+  exist,</li>
+<li>and public continuation aligns with <code>0100</code>.</li>
+</ul>
+<h1 id="consistency-model">Consistency Model<a class="headerlink" href="#consistency-model" title="Permanent link">&para;</a></h1>
+<h2 id="authority-separation">Authority Separation<a class="headerlink" href="#authority-separation" title="Permanent link">&para;</a></h2>
+<p>Durable rows and runtime projections may each carry facts from several kernels,
+but no single row replaces all of them.</p>
+<p>Assembly attempts must keep the following split explicit:</p>
+<ul>
+<li>structural authority</li>
+<li><code>LayoutSpec</code></li>
+<li>structural targets</li>
+<li>coverage and proof persistence</li>
+<li>requirement authority</li>
+<li>canonical requirement kernel</li>
+<li>readiness authority</li>
+<li>readiness-policy contract</li>
+<li>attempt authority</li>
+<li>immutable attempt record</li>
+<li>workflow authority</li>
+<li>coordinator operation runtime</li>
+<li>occupancy authority</li>
+<li>durable slot occupancy plus lifecycle-backed liveness</li>
+<li>closeout authority</li>
+<li>typed closeout contract plus final published lineage result</li>
+</ul>
+<h2 id="seal-correctness-is-a-conjunction">Seal Correctness Is A Conjunction<a class="headerlink" href="#seal-correctness-is-a-conjunction" title="Permanent link">&para;</a></h2>
+<p>Seal correctness is not one scalar predicate.
+The attempt may progress only when all relevant kernels agree:</p>
+<ul>
+<li><code>structural_ready</code></li>
+<li><code>workflow_current</code></li>
+<li><code>occupancy_live</code> when readiness policy requires live contributors</li>
+<li><code>closeout_contract_satisfied</code> before final success is reported</li>
+</ul>
+<p>This conjunction is the deepest parent invariant in the design.</p>
+<h2 id="mutation-fencing">Mutation Fencing<a class="headerlink" href="#mutation-fencing" title="Permanent link">&para;</a></h2>
+<p>If a <code>SealedBindingValue</code> currently occupies one live required slot in an open
+attempt, that same binding value must not become mutable again.</p>
+<p>Therefore:</p>
+<ul>
+<li>mutation fencing is keyed by contributor-value identity,</li>
+<li>it is derived from live slot occupancy,</li>
+<li>and it must remain coherent with the same liveness model used by readiness
+  transition and seal.</li>
+</ul>
+<h2 id="recovery-boundary">Recovery Boundary<a class="headerlink" href="#recovery-boundary" title="Permanent link">&para;</a></h2>
+<p>The attempt domain must make its recovery boundary explicit.</p>
+<p>Parent-level rule:</p>
+<ul>
+<li>before the readiness cut, live slot occupancy and coordinator currentness are
+  still part of correctness,</li>
+<li>after the readiness cut, seal correctness must depend on the captured cut
+  rather than on post-cut mutations,</li>
+<li>terminal closeout may still fail,</li>
+<li>but later contributor loss or policy edits must not retroactively change the
+  semantic contents of the already-captured cut.</li>
+</ul>
+<h1 id="invariants-and-error-model">Invariants And Error Model<a class="headerlink" href="#invariants-and-error-model" title="Permanent link">&para;</a></h1>
+<h2 id="invariants">Invariants<a class="headerlink" href="#invariants" title="Permanent link">&para;</a></h2>
+<ul>
+<li>one structural assembly trunk remains in the system,</li>
+<li><code>LayoutSpec</code> remains the single structural layout root,</li>
+<li>binding publish remains one frontend onto that trunk,</li>
+<li>the attempt boundary remains contract-first,</li>
+<li>requirement identity, readiness policy, closeout contract, attempt identity,
+  workspace identity, and contributor identity remain distinct,</li>
+<li>one immutable attempt root exists per attempt,</li>
+<li>one publish attempt uses one structural workspace,</li>
+<li>mutable pre-attempt closeout configuration is resolved before contributors are
+  accepted,</li>
+<li>only <code>SealedBindingValue</code> may contribute binding-backed bytes,</li>
+<li>a live contributor may not reopen for mutation,</li>
+<li>final success means published lineage completion, not source seal alone,</li>
+<li>SDK code never talks to Global Store directly for this workflow.</li>
+</ul>
+<h2 id="error-model">Error Model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h2>
+<p>Parent-level error expectations:</p>
+<ul>
+<li><code>INVALID_ARGUMENT</code></li>
+<li>malformed layout or contribution mapping</li>
+<li>malformed continuation payload</li>
+<li>invalid readiness or closeout input</li>
+<li><code>FAILED_PRECONDITION</code></li>
+<li>requirement mismatch</li>
+<li>slot already occupied by another live contributor</li>
+<li>binding no longer has the current sealed value</li>
+<li>required readiness facts are missing</li>
+<li><code>ABORTED</code></li>
+<li>coordinator generation advanced</li>
+<li>contributor liveness was lost before the readiness cut</li>
+<li>explicit attempt abort occurred</li>
+<li><code>DATA_LOSS</code></li>
+<li>structural bytes or seal evidence are inconsistent after safe recovery is no
+    longer possible</li>
+<li><code>DEADLINE_EXCEEDED</code></li>
+<li>coordinator wait, seal, or closeout exceeded the budget</li>
+</ul>
+<p>The concrete public and proto-facing mapping is owned by <code>0105</code>.</p>
+<h1 id="schema-direction">Schema Direction<a class="headerlink" href="#schema-direction" title="Permanent link">&para;</a></h1>
+<p>Parent-level schema rules:</p>
+<ul>
+<li>structural tables remain the structural substrate,</li>
+<li>workflow rows remain workflow substrate,</li>
+<li>slot occupancy must converge on a first-class slot model rather than on a
+  <code>view_id</code> alias,</li>
+<li>immutable attempt truth must converge on first-class durable attempt rows
+  rather than on workflow snapshots,</li>
+<li>and the next evolution step is a first-class attempt domain, not a second
+  assembly trunk.</li>
+</ul>
+<h1 id="alternatives-and-rationale">Alternatives And Rationale<a class="headerlink" href="#alternatives-and-rationale" title="Permanent link">&para;</a></h1>
+<h2 id="collapse-attempt-truth-into-binding-shaped-contract">Collapse Attempt Truth Into Binding-Shaped Contract<a class="headerlink" href="#collapse-attempt-truth-into-binding-shaped-contract" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<p>Reasons:</p>
+<ul>
+<li>binding publish is only one frontend,</li>
+<li>future frontends need the same canonical attempt kernel,</li>
+<li>and a strong-consistency domain must not make one bridge enum the
+  authoritative attempt truth.</li>
+</ul>
+<h2 id="collapse-attempt-truth-into-layoutspecexpected_view_ids">Collapse Attempt Truth Into <code>LayoutSpec.expected_view_ids</code><a class="headerlink" href="#collapse-attempt-truth-into-layoutspecexpected_view_ids" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<p>Reasons:</p>
+<ul>
+<li>layout hints are structural bridge input, not canonical requirement truth,</li>
+<li>richer requirement families need explicit attempt-level semantics,</li>
+<li>completeness must be checked against immutable attempt truth, not a weaker
+  reconstruction.</li>
+</ul>
+<h2 id="treat-structural-identity-requirement-identity-and-contributor-identity-as-one-plane">Treat Structural Identity, Requirement Identity, And Contributor Identity As One Plane<a class="headerlink" href="#treat-structural-identity-requirement-identity-and-contributor-identity-as-one-plane" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<p>Reasons:</p>
+<ul>
+<li>they answer different questions,</li>
+<li>not every requirement is naturally a structural view,</li>
+<li>and mutation fencing is already keyed by contributor-value identity in <code>0084</code>.</li>
+</ul>
+<h2 id="let-workflow-snapshots-replace-durable-attempt-truth">Let Workflow Snapshots Replace Durable Attempt Truth<a class="headerlink" href="#let-workflow-snapshots-replace-durable-attempt-truth" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<p>Reasons:</p>
+<ul>
+<li>workflow is a projection, not semantic truth storage,</li>
+<li>public continuation must project durable truth honestly,</li>
+<li>and a strong-consistency domain cannot keep its only immutable root inside a
+  workflow snapshot blob.</li>
+</ul>
+<h2 id="let-wait-perform-transition">Let <code>wait</code> Perform Transition<a class="headerlink" href="#let-wait-perform-transition" title="Permanent link">&para;</a></h2>
+<p>Rejected.</p>
+<p>Reasons:</p>
+<ul>
+<li><code>0096</code> already separates observation from transition,</li>
+<li>hidden transition inside <code>wait</code> creates a private workflow dialect,</li>
+<li>and it makes public continuation semantics dishonest.</li>
+</ul>
+<h1 id="trade-offs-and-risks">Trade-offs And Risks<a class="headerlink" href="#trade-offs-and-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>More named domain objects</strong></li>
+<li>The domain becomes more explicit.</li>
+<li>That is less risky than continuing to overload one carrier.</li>
+<li><strong>Hard-cut discipline</strong></li>
+<li>The parent-child split only works if <code>0085</code> stops restating executable
+    carriers and <code>0105</code> becomes the sole source of truth for those carriers.</li>
+<li><strong>Schema cost</strong></li>
+<li>Strong-consistency attempt semantics require more durable structure.</li>
+<li>That is an intentional cost of making the domain honest.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Parent-level acceptance requires:</p>
+<ul>
+<li>distributed publish is implemented on the existing structural assembly and
+  layout trunk,</li>
+<li><code>0105</code> is the sole executable carrier specification for the attempt domain,</li>
+<li>canonical requirement truth is frontend-agnostic,</li>
+<li>readiness policy is separate from requirement identity,</li>
+<li>closeout contract is separate from workflow state,</li>
+<li>binding-backed contribution, direct <code>register_view</code>, and future frontends all
+  lower onto the same structural commit and seal substrate,</li>
+<li>mutable pre-attempt closeout configuration is resolved before contributors are
+  accepted,</li>
+<li>attempt transition is explicit,</li>
+<li>observation is side-effect-free,</li>
+<li>public continuation aligns with <code>0100</code>,</li>
+<li>published success means the required lineage and closeout facts exist,</li>
+<li>future frontend families can all reuse the same trunk without creating
+  separate assembly implementations.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>docs/designs/0084-binding-unified-model-and-contract.md</code></li>
+<li><code>docs/designs/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md</code></li>
+<li><code>docs/plans/0085-distributed-binding-assembly-and-coordinator.md</code></li>
+<li><code>docs/plans/0105-assembly-attempt-hard-cut-spec-runtime-slot-closeout.md</code></li>
+<li><code>docs/designs/0011-unified-session-lifecycle-leases.md</code></li>
+<li><code>docs/designs/0055-programmable-framework.md</code></li>
+<li><code>docs/designs/0090-existence-semantics-and-single-authority-truth.md</code></li>
+<li><code>docs/designs/0092-artifact-profiles-shared-dataplane-and-truth-layering.md</code></li>
+<li><code>docs/designs/0094-unified-lifecycle-kernel-and-capability-families.md</code></li>
+<li><code>docs/designs/0096-workflow-companion-admission-and-fencing.md</code></li>
+<li><code>docs/designs/0100-distributed-authority-handoff-security-and-public-surfaces.md</code></li>
+<li><code>docs/architecture/view-replicas-and-assembly.md</code></li>
+<li><code>docs/architecture/api/api-design.md</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

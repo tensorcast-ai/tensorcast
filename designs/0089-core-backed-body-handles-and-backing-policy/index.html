@@ -1,0 +1,3351 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0089-core-backed-body-handles-and-backing-policy/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Core-Backed Body Handles and Backing Policy - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Core-Backed Body Handles and Backing Policy
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p><code>0088</code> established the correct seam:</p>
+<ul>
+<li>artifact profile logic stops at lowering,</li>
+<li><code>ArtifactLoweringPlan</code> is the canonical internal execution IR,</li>
+<li><code>StoreEngine</code> and <code>MaterializationFacade</code> remain the only steady-state executors,</li>
+<li><code>BodyHandle</code> is now core-backed instead of daemon-owned heap bytes.</li>
+</ul>
+<p><code>0089</code> preserves that seam and finishes the retained-body cut without creating a second body-private dataplane.</p>
+<p>The long-term target state is:</p>
+<ul>
+<li>the shared substrate is a profile-agnostic ByteSpace dataplane, not a tensor-dict-private dataplane,</li>
+<li><code>byte_artifact</code> remains an <code>Artifact</code> profile, not a parallel runtime object,</li>
+<li><code>byte_artifact</code> uses a fixed-selection profile over that shared ByteSpace dataplane rather than a second body runtime,</li>
+<li>retained bodies remain authority-local references to core-backed replicas,</li>
+<li>body policy is expressed as authority-local intent above the dataplane,</li>
+<li>content truth, runtime observation, and authority ownership are kept separate,</li>
+<li>verified content descriptors are produced by the shared executor or shared verification path, not by a body-private
+  reread path,</li>
+<li>CPU memfd export, CUDA IPC, stable retention, communicator export, and transfer scheduling continue to use existing
+  core contracts,</li>
+<li>protocol capabilities such as <code>payload_ref</code>, local handle leases, and publish capabilities converge to one shared
+  capability-to-source or handle-resolution layer above the dataplane, not to parallel transfer engines.</li>
+</ul>
+<p><code>0089</code> is therefore a containment and cutover design, not a new "body runtime" design.</p>
+<p>It exists to make sure <code>byte_artifact</code> does not grow a second policy model, a second transfer model, or a second
+physical lifecycle model under the unified artifact architecture.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The latest <code>0088</code> code line is materially better than the pre-lowering controller design:</p>
+<ul>
+<li><code>ArtifactLoweringPlan</code> and <code>execute_artifact_lowering_plan(...)</code> exist as real core execution contracts,</li>
+<li><code>BodyHandle</code> is backed by a core <code>ReplicaHandle</code>,</li>
+<li><code>BatchGetIntoRegion</code> and <code>BatchPutIfAbsentFromRegion</code> lower through the shared core dataplane,</li>
+<li><code>payload_ref</code> issuance and chunk reads can operate on <code>BodyHandle</code> instead of forcing daemon heap strings.</li>
+</ul>
+<p>However, the current body-backing story is still incomplete in five important ways:</p>
+<ol>
+<li>retained-body policy is still implicit and controller-local,</li>
+<li>body staging for <code>put</code> is still hard-coded to a CPU replica target,</li>
+<li>invariant validation still rereads the full body through <code>BodyHandle::compute_sha256_hex()</code>,</li>
+<li>batch communicator export still falls back to daemon-owned staged slabs because <code>BodyHandle</code> does not yet expose the
+   export-view API needed by routed batch transport,</li>
+<li>the design vocabulary is still too close to a body-private backing taxonomy instead of the repository-wide
+   memory/export vocabulary.</li>
+</ol>
+<p>That last point is the architectural danger.</p>
+<p>If <code>0089</code> is solved naively, TensorCast risks creating:</p>
+<ul>
+<li>one artifact model at the API level,</li>
+<li>but a second data-plane language underneath it for body storage, local export, and remote transfer.</li>
+</ul>
+<p>There is also a deeper version of the same failure mode:</p>
+<ul>
+<li>the project would keep saying "shared dataplane",</li>
+<li>but would implicitly treat the current executor as a tensor-dict-specific dataplane,</li>
+<li>while <code>byte_artifact</code> grows its own capability-resolution, verification, and remote-transfer rules beside it.</li>
+</ul>
+<p>That would still be duplication, only at a lower layer.</p>
+<p>That would violate the long-term project line from:</p>
+<ul>
+<li><code>0039</code>: one artifact-first value model,</li>
+<li><code>0055</code>: programmable control plane, fixed data plane,</li>
+<li><code>0078</code>: one selection contract,</li>
+<li><code>0088</code>: authority specialization with shared execution.</li>
+</ul>
+<h1 id="current-state-grounding">Current State &amp; Grounding<a class="headerlink" href="#current-state-grounding" title="Permanent link">&para;</a></h1>
+<p>Current code baseline after <code>0088</code>:</p>
+<ul>
+<li>the canonical internal lowering IR exists:</li>
+<li><code>core/store/runtime/ingestion/artifact_lowering_plan.h</code></li>
+<li><code>core/store/runtime/ingestion/materialization_facade.cc</code></li>
+<li><code>core/store/store_engine.cc</code></li>
+<li>the core executor already consumes that IR for:</li>
+<li><code>into_target</code> execution,</li>
+<li>replica-target execution into a core-backed body replica.</li>
+<li><code>BodyHandle</code> wraps a core-backed <code>ReplicaHandle</code> and exposes:</li>
+<li><code>make_loader()</code>,</li>
+<li><code>read_range(...)</code>,</li>
+<li><code>read_all_bytes()</code>,</li>
+<li><code>compute_sha256_hex()</code>,</li>
+<li><code>retire()</code>.</li>
+<li><code>BodyHandle</code> does not yet expose a transport-neutral export-view API for batch communicator realization, so routed
+  batch transport still has to stage daemon-owned slabs when it wants one exported pack.</li>
+<li><code>ByteArtifactController</code> stages incoming payload sources into a core-backed <code>BodyHandle</code> before authority commit.</li>
+<li><code>PayloadTransportBroker</code> can:</li>
+<li>issue <code>payload_ref</code> from a <code>BodyHandle</code>,</li>
+<li>open loaders for remote <code>payload_ref</code>,</li>
+<li>serve local chunk reads from <code>BodyHandle</code>.</li>
+</ul>
+<p>Current architectural constraints still visible in code:</p>
+<ul>
+<li>remote <code>payload_ref</code> fetch still uses a chunk-RPC transport path rather than converging to the full shared
+  remote-source family,</li>
+<li>stable-retention policy is still wired through existing core hooks rather than a full <code>StorePolicy</code> / retention
+  registry seam,</li>
+<li>future publish and retention capabilities have not yet terminated in the same shared resolution layer,</li>
+<li>body vocabulary must still stay explicitly mapped onto the core concepts that already exist:</li>
+<li><code>MemoryLocation</code>,</li>
+<li>stable lease,</li>
+<li>export pin,</li>
+<li>CPU memfd handle lease,</li>
+<li>CUDA IPC export,</li>
+<li>communicator export and <code>P2PSource</code>.</li>
+</ul>
+<p>Relevant existing infrastructure that this design must reuse rather than replace:</p>
+<ul>
+<li>artifact-first retrieval semantics from <code>0039</code>,</li>
+<li>fixed dataplane / programmable control-plane rules from <code>0055</code>,</li>
+<li>single selection identity from <code>0078</code>,</li>
+<li>stable-memory terminology and budgeting rules from <code>0034</code>,</li>
+<li>CPU memfd export and handle lease semantics from <code>0049</code>,</li>
+<li>stable DRAM publish and memfd lease semantics from <code>0082</code>,</li>
+<li>routed byte-artifact authority split from <code>0087</code>,</li>
+<li>unified artifact execution and shared lowering from <code>0088</code>.</li>
+</ul>
+<p>Normative grounding rule for <code>0089</code>:</p>
+<ul>
+<li>this design assumes the latest <code>0088</code> code line as its baseline reality,</li>
+<li>it must not redefine <code>ArtifactLoweringPlan</code>,</li>
+<li>it must not move steady-state execution out of <code>StoreEngine</code>,</li>
+<li>it must not introduce a body-private copy, transfer, export, or retention runtime.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<p>Goals</p>
+<ul>
+<li>Keep <code>byte_artifact</code> inside the same artifact, selection, and dataplane model as the rest of TensorCast.</li>
+<li>Express retained-body choice as authority-local intent above the dataplane, not as a second executor contract.</li>
+<li>Separate three concerns clearly:</li>
+<li>verified content truth,</li>
+<li>runtime backing observation,</li>
+<li>authority-local retention ownership.</li>
+<li>Keep <code>BodyHandle</code> as a reference to core-owned state rather than a new value object.</li>
+<li>Reuse existing core mechanisms for:</li>
+<li>CPU memfd local export,</li>
+<li>CUDA IPC local export,</li>
+<li>stable retention admission,</li>
+<li>communicator export,</li>
+<li>P2P or chunked transfer fallback.</li>
+<li>Let <code>BodyHandle</code> surface transport-neutral export views for shared local or remote source realization without turning
+  the handle itself into a transport owner.</li>
+<li>Move invariant validation onto verified descriptor metadata so common-path correctness does not reread full bodies.</li>
+<li>Make the long-term transfer direction explicit: <code>payload_ref</code> is capability first, shared source second, chunk fallback
+  last.</li>
+<li>Optimize for the end-state architecture instead of compatibility-preserving internal shapes.</li>
+</ul>
+<p>Non-Goals</p>
+<ul>
+<li>Introducing a second value abstraction parallel to <code>Artifact</code>.</li>
+<li>Introducing a second selection abstraction parallel to <code>ArtifactSelection</code>.</li>
+<li>Introducing a second policy center parallel to <code>StorePolicy</code>.</li>
+<li>Introducing a body-private transfer or export subsystem in daemon/service.</li>
+<li>Pushing high-cardinality body truth into Global Store.</li>
+<li>Introducing cross-host shared-memory export.</li>
+<li>Preserving current controller-local body helpers or body-private transport semantics as long-term compatibility shims.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-scope-boundary-with-repository-wide-constraints">1. Scope boundary with repository-wide constraints<a class="headerlink" href="#1-scope-boundary-with-repository-wide-constraints" title="Permanent link">&para;</a></h2>
+<p><code>0088</code> remains normative for:</p>
+<ul>
+<li>artifact-profile layering,</li>
+<li>shared dataplane lowering,</li>
+<li>core-owned execution,</li>
+<li>routed byte-artifact authority semantics.</li>
+</ul>
+<p><code>0089</code> is the follow-on for:</p>
+<ul>
+<li>retained-body ownership shape,</li>
+<li>body policy intent above lowering,</li>
+<li>descriptor-driven validation,</li>
+<li>transfer and export convergence over core-backed bodies.</li>
+</ul>
+<p>If documents overlap:</p>
+<ul>
+<li><code>0039</code> wins on artifact-first value semantics,</li>
+<li><code>0055</code> wins on fixed dataplane rules,</li>
+<li><code>0078</code> wins on selection identity,</li>
+<li><code>0034</code> wins on memory-tier terminology,</li>
+<li><code>0088</code> wins on lowering and execution semantics,</li>
+<li><code>0089</code> wins on retained-body ownership and policy semantics above that seam.</li>
+</ul>
+<h2 id="2-constitutional-rules">2. Constitutional rules<a class="headerlink" href="#2-constitutional-rules" title="Permanent link">&para;</a></h2>
+<ol>
+<li>There is one value model, and it is <code>Artifact</code>.</li>
+<li>There is one selection model, and it is <code>ArtifactSelection</code>.</li>
+<li>There is one steady-state dataplane, and it is the shared core ByteSpace dataplane rooted in resolved byte sources,
+   byte-range maps, targets, replicas, and core transfer/export facilities.</li>
+<li>There is one memory/export ledger, and it is the existing core vocabulary around <code>MemoryLocation</code>, stable lease,
+   export pin, handle lease, and communicator export.</li>
+<li>There is one durability and placement declaration, and it is <code>StorePolicy</code>.</li>
+<li><code>BodyBackingIntent</code> is only an internal lowering hint derived from <code>StorePolicy</code>, route role, access pattern, and
+   locality. It must not become a second policy surface.</li>
+<li><code>byte_artifact</code> may specialize authority, routing, and retention policy, but it must not specialize steady-state
+   copy, transfer, or export semantics below lowering.</li>
+<li><code>BodyStore</code> is an authority-local retained-backing index. It is not a second payload heap, not a second export
+   registry, and not a second retention ledger.</li>
+<li><code>BodyDescriptor</code> stores verified content truth only. It must not become a duplicate memory/export state machine.</li>
+<li><code>payload_ref</code> is a capability and rendezvous primitive. It must not remain the long-term primary transfer substrate
+   for large retained bodies.</li>
+<li>Any body-specific vocabulary must be derived from or mapped onto core concepts. Body code must not invent parallel
+   semantics for residency, exportability, or retention.</li>
+<li>There is one capability-resolution rule: protocol capabilities must resolve to a shared loader, source, or existing
+    local handle/export mechanism before copy execution begins.</li>
+<li>Synthetic single-payload metadata for <code>byte_artifact</code> is only an adapter onto the shared ByteSpace dataplane. It is
+    not a second semantic model.</li>
+</ol>
+<h2 id="3-layering-model">3. Layering model<a class="headerlink" href="#3-layering-model" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+  A["Artifact Semantic Layer&lt;br&gt;Artifact / ArtifactSelection / Binding / Region"] --&gt; B["Authority And Profile Runtime&lt;br&gt;truth, routing, invariants, retention intent"]
+  B --&gt; C["ByteSpace Lowering&lt;br&gt;resolved source + byte-range map + target + hints"]
+  C --&gt; D["Core Shared ByteSpace Executor&lt;br&gt;StoreEngine / MaterializationFacade / ReplicaRuntime"]
+  D --&gt; E["Retained Backing Result&lt;br&gt;BodyHandle + verified content projection + observation seed"]
+  E --&gt; F["BodyStore&lt;br&gt;authority-local descriptor + handle index + visibility metadata"]
+  E --&gt; G["Shared Capability Resolution&lt;br&gt;loader / local handle / communicator source / fallback"]
+  G --&gt; H["payload_ref / local reads / region-backed writes / future capability consumers"]</code></pre>
+<p>Normative rules:</p>
+<ul>
+<li>profile code may choose intent, but not own execution,</li>
+<li>backing creation must happen through the shared lowering seam,</li>
+<li>backing observation and verified content truth must be derived from the resulting core execution state,</li>
+<li><code>BodyStore</code> stores authority-local ownership of the retained backing, not the transfer or export machinery itself,</li>
+<li>any body-facing read path must consume a <code>BodyHandle</code> or a standard source/loader derived from it.</li>
+</ul>
+<h2 id="4-canonical-abstractions">4. Canonical abstractions<a class="headerlink" href="#4-canonical-abstractions" title="Permanent link">&para;</a></h2>
+<h3 id="40-shared-bytespace-dataplane">4.0 Shared ByteSpace dataplane<a class="headerlink" href="#40-shared-bytespace-dataplane" title="Permanent link">&para;</a></h3>
+<p>The shared substrate reused by <code>tensor_dict</code>, <code>byte_artifact</code>, and future profiles must be understood as a ByteSpace
+dataplane, not as a tensor-dict-specific dataplane.</p>
+<p>Its canonical shape is:</p>
+<ul>
+<li>a resolved byte source or source capability,</li>
+<li>a byte-range map,</li>
+<li>a target layout or retained replica target,</li>
+<li>shared execution through loaders, sources, sinks, pump scheduling, and core export facilities.</li>
+</ul>
+<p>Consequences:</p>
+<ul>
+<li><code>tensor_dict</code> is one profile that lowers rich selection and index metadata into this dataplane,</li>
+<li><code>byte_artifact</code> is another profile that lowers a fixed single-payload selection into the same dataplane,</li>
+<li>region-backed into-target, retained-body staging, local export, and remote transfer must all converge on the same
+  ByteSpace execution contracts.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li><code>byte_artifact</code> must not be described as "reusing the tensor-dict dataplane" in a way that implies second-class
+  attachment,</li>
+<li>instead, both profiles are peers above the same ByteSpace dataplane.</li>
+</ul>
+<h3 id="41-bodyaccessclass">4.1 <code>BodyAccessClass</code><a class="headerlink" href="#41-bodyaccessclass" title="Permanent link">&para;</a></h3>
+<p><code>BodyAccessClass</code> is the highest-level vocabulary and stays above the dataplane.</p>
+<p>Required minimum classes:</p>
+<ul>
+<li><code>HOME_DEFAULT</code></li>
+<li>retained home backing with mixed or unknown future readers.</li>
+<li><code>LOCAL_GPU_HOT</code></li>
+<li>expected near-term local GPU reuse dominates.</li>
+<li><code>TRANSIENT_FORWARD</code></li>
+<li>body exists only to complete a redirect or forward.</li>
+<li><code>SMALL_OBJECT</code></li>
+<li>tiny-object path where bounded fallback can be acceptable.</li>
+</ul>
+<p>This is the only place where body-specific semantic classes are encouraged.</p>
+<h3 id="42-bodybackingintent-as-an-internal-lowering-hint">4.2 <code>BodyBackingIntent</code> as an internal lowering hint<a class="headerlink" href="#42-bodybackingintent-as-an-internal-lowering-hint" title="Permanent link">&para;</a></h3>
+<p><code>BodyBackingIntent</code> replaces a monolithic body backing enum, but it is intentionally <em>not</em> a second policy surface.</p>
+<p>It is only an internal lowering hint used inside authority/runtime code to derive the existing core execution request.</p>
+<p>It expresses execution hinting as orthogonal fields above the dataplane and above protocol-specific capability
+resolution:</p>
+<ul>
+<li><code>preferred_residency</code></li>
+<li><code>CPU</code></li>
+<li><code>GPU</code></li>
+<li><code>retention_intent</code></li>
+<li><code>EPHEMERAL</code></li>
+<li><code>RETAINED</code></li>
+<li><code>stable_retention_requirement</code></li>
+<li><code>NONE</code></li>
+<li><code>PREFER_STABLE</code></li>
+<li><code>REQUIRE_STABLE</code></li>
+<li><code>sharing_intent</code></li>
+<li><code>PRIVATE_LOCAL</code></li>
+<li><code>LOCAL_READ_MOSTLY</code></li>
+<li><code>REMOTE_SHAREABLE</code></li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>intent is a derived internal hint, not user-declared policy,</li>
+<li>intent must be computed from <code>StorePolicy</code>, route role, access pattern, locality, and object size rather than
+  persisted as a second declarative contract,</li>
+<li>intent is not itself an execution result,</li>
+<li>intent must lower to standard core contracts instead of becoming a body-private target type,</li>
+<li>intent must not encode concrete serving protocols such as <code>MEMFD</code>, <code>CUDA_IPC</code>, <code>COMMUNICATOR</code>, or <code>CHUNK_RPC</code>; those
+  are resolved later against existing shared capability mechanisms.</li>
+</ul>
+<h3 id="43-bodybackingobservation">4.3 <code>BodyBackingObservation</code><a class="headerlink" href="#43-bodybackingobservation" title="Permanent link">&para;</a></h3>
+<p><code>BodyBackingObservation</code> is the post-execution runtime snapshot for the retained body.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>physical_artifact_id</code></li>
+<li><code>memory_location</code></li>
+<li><code>size_bytes</code></li>
+<li><code>cpu_memfd_available</code></li>
+<li><code>cuda_ipc_available</code></li>
+<li><code>communicator_export_state</code> summary</li>
+<li><code>stable_retention_state</code> summary</li>
+<li><code>observed_at</code></li>
+</ul>
+<p>Purpose:</p>
+<ul>
+<li>make policy outcomes and operator-visible results observable,</li>
+<li>avoid re-encoding core state into body-private persistent truth,</li>
+<li>let observability and transport decisions consume a normalized snapshot without inventing a second memory model.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li><code>BodyBackingObservation</code> is derived from core state,</li>
+<li>it must not be treated as the source of truth for actual lease, export, or retention ownership,</li>
+<li>actual export and lease lifetimes remain owned by existing core and daemon lease registries.</li>
+</ul>
+<h3 id="44-resolvedbodycapability">4.4 <code>ResolvedBodyCapability</code><a class="headerlink" href="#44-resolvedbodycapability" title="Permanent link">&para;</a></h3>
+<p><code>ResolvedBodyCapability</code> is a demand-time, consumer-scoped resolution result derived from:</p>
+<ul>
+<li><code>BodyHandle</code>,</li>
+<li>current core exportability state,</li>
+<li>locality of the consumer,</li>
+<li>existing capability tokens or lease scopes.</li>
+</ul>
+<p>Allowed forms:</p>
+<ul>
+<li>standard loader or source for shared dataplane reads,</li>
+<li>existing local handle-lease path for CPU memfd or CUDA IPC zero-copy access,</li>
+<li>communicator-backed remote source such as <code>P2PSource</code>,</li>
+<li>chunk-RPC fallback when no shared source is available or when the object is intentionally tiny.</li>
+</ul>
+<p>Purpose:</p>
+<ul>
+<li>keep protocol-specific capability handling out of retained-body truth,</li>
+<li>ensure every consumer path resolves through one shared source or handle layer before execution,</li>
+<li>prevent <code>payload_ref</code> from being the only special case that "sometimes" becomes a source.</li>
+</ul>
+<p>Scope note:</p>
+<ul>
+<li><code>0089</code> names this seam from the body side because <code>byte_artifact</code> is the immediate caller,</li>
+<li>but the seam itself is intentionally generic and should be shared by all capability front doors,</li>
+<li><code>payload_ref</code>, CPU memfd leases, CUDA IPC leases, and future publish capabilities must all terminate here rather than
+  each growing private transport logic.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li><code>ResolvedBodyCapability</code> is not stored as authority truth in <code>BodyStore</code>,</li>
+<li>protocol capabilities such as <code>payload_ref</code>, local memfd/CUDA IPC handle leases, target publication capabilities, and
+  future retention capabilities must converge through this shared resolution layer,</li>
+<li>capability resolution must happen before copy execution and must terminate in a shared loader, source, or existing
+  local handle path.</li>
+</ul>
+<h3 id="45-bodydescriptor">4.5 <code>BodyDescriptor</code><a class="headerlink" href="#45-bodydescriptor" title="Permanent link">&para;</a></h3>
+<p><code>BodyDescriptor</code> is the verified content-truth record attached to a committed body.</p>
+<p>Naming note:</p>
+<ul>
+<li><code>0089</code> keeps the body-local name because this change is scoped to retained byte bodies,</li>
+<li>but the concept intentionally aligns with a future generic verified-content descriptor seam,</li>
+<li>this design must not make the concept body-private in structure or responsibility.</li>
+</ul>
+<p>Required fields:</p>
+<ul>
+<li><code>physical_artifact_id</code></li>
+<li><code>layout_id</code></li>
+<li><code>size_bytes</code></li>
+<li><code>payload_digest_alg</code></li>
+<li><code>payload_digest_hex</code></li>
+<li><code>created_at</code></li>
+<li><code>verified_at</code></li>
+</ul>
+<p>Purpose:</p>
+<ul>
+<li>decouple verified content truth from the operational handle,</li>
+<li>make join and invariant checks consume stable metadata instead of rereading body bytes,</li>
+<li>avoid conflating content truth with residency or export state.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li><code>BodyDescriptor</code> must not become a duplicate exportability or retention schema,</li>
+<li>runtime capability and residency information belongs in <code>BodyBackingObservation</code>, not in <code>BodyDescriptor</code>.</li>
+</ul>
+<h3 id="451-descriptor-production-rule">4.5.1 Descriptor production rule<a class="headerlink" href="#451-descriptor-production-rule" title="Permanent link">&para;</a></h3>
+<p><code>BodyDescriptor</code> must be produced atomically with body staging.</p>
+<p>Required sequence:</p>
+<ol>
+<li>classify access class and compute backing intent,</li>
+<li>stage the source through <code>ArtifactLoweringPlan</code>,</li>
+<li>obtain the resulting <code>BodyHandle</code>,</li>
+<li>compute or verify digest and any other verified content metadata exactly once through the shared executor or a shared
+   verification path invoked by it,</li>
+<li>return or project that verified result into <code>BodyDescriptor</code>,</li>
+<li>derive the initial runtime observation from the resulting core state,</li>
+<li>store descriptor plus handle together in <code>BodyStore</code>.</li>
+</ol>
+<p>This prevents the anti-pattern where common-path authority validation depends on reopening and rereading the body after
+the backing already exists.</p>
+<p>Additional normative rule:</p>
+<ul>
+<li>the shared lowering result returns verified content metadata for retained bodies;</li>
+<li>daemon/body code must not introduce a second common-path verification pipeline beside core.</li>
+</ul>
+<h3 id="46-bodyhandle">4.6 <code>BodyHandle</code><a class="headerlink" href="#46-bodyhandle" title="Permanent link">&para;</a></h3>
+<p><code>BodyHandle</code> remains the execution-facing reference to a core-backed retained body.</p>
+<p>Required responsibilities:</p>
+<ul>
+<li>open a standard loader or source for shared dataplane reads,</li>
+<li>surface a transport-neutral export-view acquisition path that returns core-backed exportability, backing identity, and
+  lifetime keepalive for shared source realization,</li>
+<li>allow bounded debug reads when necessary,</li>
+<li>retire the underlying core backing when authority no longer owns it.</li>
+</ul>
+<p>Must not own:</p>
+<ul>
+<li>semantic truth,</li>
+<li>verified descriptor truth,</li>
+<li>cached authority observation,</li>
+<li>selection identity,</li>
+<li>route policy,</li>
+<li>TTL policy,</li>
+<li>stable-retention policy,</li>
+<li>export protocol state,</li>
+<li>communicator registration state,</li>
+<li>profile-specific lifecycle rules.</li>
+</ul>
+<p>Additional long-term rules:</p>
+<ul>
+<li><code>BodyHandle::Kind</code> must not grow into a second taxonomy for residency/export/retention semantics,</li>
+<li><code>read_range(...)</code>, <code>read_all_bytes()</code>, and <code>compute_sha256_hex()</code> remain debug or fallback helpers,</li>
+<li>they must not remain part of the default authority validation path once <code>BodyDescriptor</code> is in place.</li>
+</ul>
+<p>Authority-facing descriptor and observation live in <code>BodyStoreEntry</code> or an equivalent authority view, not in the handle
+itself.</p>
+<h4 id="461-follow-on-export-view-api-for-routed-batch-transport">4.6.1 Follow-on export-view API for routed batch transport<a class="headerlink" href="#461-follow-on-export-view-api-for-routed-batch-transport" title="Permanent link">&para;</a></h4>
+<p>Accepted follow-on work from <code>0087</code> requires source-side batch communicator export to acquire reusable backing views
+through <code>BodyHandle</code>, not by teaching <code>PayloadTransportBroker</code> to inspect <code>StoreEngine</code> or <code>ReplicaRuntime</code>
+internals directly.</p>
+<p>Accepted API direction:</p>
+<div class="language-c++ highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">BodyExportRequest</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">preferred_location</span><span class="p">{</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">      </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="o">::</span><span class="n">CPU</span><span class="p">};</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">require_remote_source</span><span class="p">{</span><span class="nb">false</span><span class="p">};</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">allow_segmented_export</span><span class="p">{</span><span class="nb">true</span><span class="p">};</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="p">};</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">struct</span><span class="w"> </span><span class="nc">BodyExportCapability</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">  </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">memory_location</span><span class="p">{</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">      </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="o">::</span><span class="n">NONE</span><span class="p">};</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">local_loader_available</span><span class="p">{</span><span class="nb">false</span><span class="p">};</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">remote_source_eligible</span><span class="p">{</span><span class="nb">false</span><span class="p">};</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">supports_segmented_export</span><span class="p">{</span><span class="nb">false</span><span class="p">};</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="p">};</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="k">struct</span><span class="w"> </span><span class="nc">BodyExportView</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">  </span><span class="n">store</span><span class="o">::</span><span class="n">runtime</span><span class="o">::</span><span class="n">ingestion</span><span class="o">::</span><span class="n">BackingIdentity</span><span class="w"> </span><span class="n">backing_identity</span><span class="p">;</span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">binding_generation</span><span class="p">{</span><span class="mi">0</span><span class="p">};</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">  </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="w"> </span><span class="n">memory_location</span><span class="p">{</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">      </span><span class="n">common</span><span class="o">::</span><span class="n">memory</span><span class="o">::</span><span class="n">MemoryLocation</span><span class="o">::</span><span class="n">NONE</span><span class="p">};</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">optional</span><span class="o">&lt;</span><span class="n">store</span><span class="o">::</span><span class="n">ExportRegistration</span><span class="o">&gt;</span><span class="w"> </span><span class="n">communicator_export</span><span class="p">;</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">shared_ptr</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">&gt;</span><span class="w"> </span><span class="n">keepalive</span><span class="p">;</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="p">};</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="k">class</span><span class="w"> </span><span class="nc">BodyHandle</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="w"> </span><span class="k">public</span><span class="o">:</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="w">  </span><span class="p">[[</span><span class="na">nodiscard</span><span class="p">]]</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">BodyExportCapability</span><span class="o">&gt;</span><span class="w"> </span><span class="n">inspect_export_capability</span><span class="p">()</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a><span class="w">  </span><span class="p">[[</span><span class="na">nodiscard</span><span class="p">]]</span><span class="w"> </span><span class="n">absl</span><span class="o">::</span><span class="n">StatusOr</span><span class="o">&lt;</span><span class="n">BodyExportView</span><span class="o">&gt;</span><span class="w"> </span><span class="n">acquire_export_view</span><span class="p">(</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="w">      </span><span class="k">const</span><span class="w"> </span><span class="n">BodyExportRequest</span><span class="o">&amp;</span><span class="w"> </span><span class="n">request</span><span class="p">)</span><span class="w"> </span><span class="k">const</span><span class="p">;</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="p">};</span>
+</span></code></pre></div>
+<p>The exact field set may still narrow during implementation, but the boundary is normative:</p>
+<ul>
+<li>the handle API must return backing identity plus binding generation so transport code stays aligned with live-backing
+  capability semantics,</li>
+<li>the returned view must carry an opaque keepalive that keeps both the retained backing and any active export valid for
+  the caller's use window,</li>
+<li>the initial implementation may expose communicator registration through the view because communicator export is the
+  existing shared remote-source mechanism, but batch metadata such as <code>transport_id</code>, manifest offsets, TTL policy, or
+  consumer routing must stay out of <code>BodyHandle</code>,</li>
+<li>callers that cannot obtain a compatible view must be able to fall back cleanly to staged slab or chunked transport
+  paths.</li>
+</ul>
+<p>Phase-2 implementation notes:</p>
+<ul>
+<li><code>acquire_export_view(...)</code> now caches one live communicator export lease per resolved memory location on the retained
+  backing and reuses that lease while callers hold the opaque keepalive,</li>
+<li>the keepalive returned by <code>BodyExportView</code> covers both retained-backing lifetime and communicator export lifetime,</li>
+<li>producer-side segmented communicator export negotiation is advertised separately through
+  <code>GetServerConfig.batch_payload_segmented_communicator_export_enabled</code> and the mirrored
+  <code>PeerBatchTransportSupport</code> bit; <code>BodyHandle</code> stays transport-neutral and does not encode peer policy or batch
+  routing metadata.</li>
+</ul>
+<p>Naming Compliance</p>
+<ul>
+<li><code>BodyExportRequest</code>, <code>BodyExportCapability</code>, <code>BodyExportView</code>, and <code>BodyHandle</code> are <code>PascalCase</code> types.</li>
+<li><code>inspect_export_capability</code> and <code>acquire_export_view</code> are <code>snake_case</code> methods.</li>
+<li>This API proposal does not introduce new constant names; any future constants must remain <code>ALL_CAPS</code>.</li>
+</ul>
+<h3 id="47-bodystoreentry">4.7 <code>BodyStoreEntry</code><a class="headerlink" href="#47-bodystoreentry" title="Permanent link">&para;</a></h3>
+<p><code>BodyStoreEntry</code> is the canonical authority-local retained-body shape:</p>
+<ul>
+<li><code>BodyDescriptor descriptor</code></li>
+<li><code>BodyHandle body_handle</code></li>
+<li>optional derived <code>PutIfAbsentInvariant join_invariant</code></li>
+<li>expiry and fencing metadata</li>
+<li>optional cached <code>BodyBackingObservation</code></li>
+<li>optional capacity and last-access bookkeeping</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li><code>join_invariant</code>, when materialized, is a request/join projection derived from <code>BodyDescriptor</code>,</li>
+<li><code>BodyDescriptor</code> is the canonical content truth,</li>
+<li><code>BodyStoreEntry</code> must not preserve two independent content-truth records that can drift.</li>
+</ul>
+<p><code>BodyStore</code> owns:</p>
+<ul>
+<li>visibility,</li>
+<li>TTL and routing-epoch gating,</li>
+<li>authority-local join / fence metadata,</li>
+<li>lightweight capacity and prune bookkeeping,</li>
+<li>eventual retirement of the retained backing.</li>
+</ul>
+<p><code>BodyStore</code> must not own:</p>
+<ul>
+<li>payload bytes as the primary representation,</li>
+<li>export handles independent of core,</li>
+<li>communicator registrations,</li>
+<li>local handle leases,</li>
+<li>transfer loops,</li>
+<li>stable admission policy,</li>
+<li>export pin policy,</li>
+<li>communicator export policy,</li>
+<li>a second memory-budget system.</li>
+</ul>
+<h3 id="48-bodybackingmanager">4.8 <code>BodyBackingManager</code><a class="headerlink" href="#48-bodybackingmanager" title="Permanent link">&para;</a></h3>
+<p><code>BodyBackingManager</code> is the explicit daemon-side helper and local owner inside the profile runtime between authority
+logic and shared execution.</p>
+<p>Responsibilities:</p>
+<ul>
+<li>classify access class,</li>
+<li>compute <code>BodyBackingIntent</code>,</li>
+<li>build the corresponding <code>ArtifactLoweringPlan</code>,</li>
+<li>execute that plan through <code>StoreEngine</code>,</li>
+<li>produce <code>BodyDescriptor</code>,</li>
+<li>derive <code>BodyBackingObservation</code>,</li>
+<li>request existing retention or export hooks when policy requires them,</li>
+<li>retire temporary backings on failure or after forwarding.</li>
+</ul>
+<p>Candidate location:</p>
+<ul>
+<li>inside the <code>byte_artifact</code> profile runtime implementation in daemon-side authority code, not as a new top-level system
+  beside <code>ArtifactProfileRuntime</code>, and not in <code>core/store</code>.</li>
+</ul>
+<p>Reason:</p>
+<ul>
+<li>intent choice depends on authority and workload semantics above the dataplane,</li>
+<li>actual execution, export, and memory-state transitions must still remain in core.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li><code>BodyBackingManager</code> may orchestrate calls to existing core APIs,</li>
+<li>it must not own a second copy, export, transfer, or lease runtime,</li>
+<li>it is an internal helper of <code>ByteArtifactProfileRuntime</code> or an equivalent profile-runtime owner, not a parallel
+  architecture layer,</li>
+<li>controller-local helpers such as <code>build_body_lowering_plan(...)</code> and <code>stage_loader_to_body(...)</code> are removed from the
+  retained-body fast path and must not be reintroduced.</li>
+</ul>
+<h3 id="49-deterministic-physical-backing-identity">4.9 Deterministic physical backing identity<a class="headerlink" href="#49-deterministic-physical-backing-identity" title="Permanent link">&para;</a></h3>
+<p>The current code already synthesizes a distinct physical backing artifact id for retained body staging.</p>
+<p><code>0089</code> makes that behavior explicit:</p>
+<ul>
+<li>retained body staging must use a deterministic internal <code>physical_artifact_id</code>,</li>
+<li>that id exists to name the backing object inside core runtime and observability,</li>
+<li>it is not the semantic artifact identity exposed to clients,</li>
+<li>it must be derived from stable body invariants rather than request-local randomness.</li>
+</ul>
+<p>Minimum derivation inputs:</p>
+<ul>
+<li>logical <code>artifact_id</code></li>
+<li><code>layout_id</code></li>
+<li>normalized <code>payload_digest_hex</code></li>
+<li>any material execution discriminator required for materially different retained backings</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>semantic artifact identity and physical backing identity remain distinct concepts,</li>
+<li>authority truth stays keyed by semantic <code>artifact_id</code>,</li>
+<li>core lifecycle and observability may key retained backing by <code>physical_artifact_id</code>.</li>
+</ul>
+<p>Long-term project rule:</p>
+<ul>
+<li>although <code>0089</code> first applies this to retained byte bodies, deterministic physical backing identity should converge
+  toward a repository-wide backing-identity concept used consistently by retention, export, publish, and observability
+  flows,</li>
+<li><code>byte_artifact</code> must not become the sole owner of a private "physical backing identity" language.</li>
+</ul>
+<p>Identity boundary note:</p>
+<ul>
+<li>semantic artifact identity,</li>
+<li>selection identity,</li>
+<li>and physical backing identity</li>
+</ul>
+<p>must remain distinct layers even for fixed-selection <code>byte_artifact</code>.</p>
+<p><code>0089</code> does not attempt a repo-wide identity-key rewrite, but it must not blur those boundaries or make the current
+retention-key inconsistencies worse.</p>
+<h2 id="5-policy-and-execution-contract">5. Policy and execution contract<a class="headerlink" href="#5-policy-and-execution-contract" title="Permanent link">&para;</a></h2>
+<h3 id="51-inputs-that-belong-above-the-dataplane">5.1 Inputs that belong above the dataplane<a class="headerlink" href="#51-inputs-that-belong-above-the-dataplane" title="Permanent link">&para;</a></h3>
+<p>Backing intent must use only inputs that belong above execution:</p>
+<ul>
+<li>source location and source kind,</li>
+<li>payload byte length,</li>
+<li>access class,</li>
+<li>expected locality and fanout,</li>
+<li>TTL or retention class,</li>
+<li>route role:</li>
+<li>home authority storage,</li>
+<li>transient forwarder staging,</li>
+<li>local direct-read staging,</li>
+<li>available CPU and GPU budgets,</li>
+<li><code>engine.cpu_shared_memory.enabled</code>,</li>
+<li>known local export capability,</li>
+<li>known communicator availability.</li>
+</ul>
+<h3 id="52-default-intent-profiles">5.2 Default intent profiles<a class="headerlink" href="#52-default-intent-profiles" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Access class</th>
+<th>Preferred residency</th>
+<th>Retention intent</th>
+<th>Stable retention requirement</th>
+<th>Sharing intent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>HOME_DEFAULT</code></td>
+<td><code>CPU</code></td>
+<td><code>RETAINED</code></td>
+<td><code>PREFER_STABLE</code></td>
+<td><code>REMOTE_SHAREABLE</code></td>
+</tr>
+<tr>
+<td><code>LOCAL_GPU_HOT</code></td>
+<td><code>GPU</code></td>
+<td><code>RETAINED</code></td>
+<td><code>NONE</code></td>
+<td><code>LOCAL_READ_MOSTLY</code></td>
+</tr>
+<tr>
+<td><code>TRANSIENT_FORWARD</code></td>
+<td>source-aligned, otherwise <code>CPU</code></td>
+<td><code>EPHEMERAL</code></td>
+<td><code>NONE</code></td>
+<td><code>REMOTE_SHAREABLE</code></td>
+</tr>
+<tr>
+<td><code>SMALL_OBJECT</code></td>
+<td><code>CPU</code></td>
+<td><code>EPHEMERAL</code> by default</td>
+<td><code>NONE</code></td>
+<td><code>PRIVATE_LOCAL</code></td>
+</tr>
+</tbody>
+</table>
+<p>These are intent defaults, not guarantees.</p>
+<p>Additional rule:</p>
+<ul>
+<li>these defaults are internal derivation rules only,</li>
+<li>they are not a second API contract,</li>
+<li>callers continue to declare durability and placement through <code>StorePolicy</code>, not through body-specific fields.</li>
+</ul>
+<h3 id="53-admission-split">5.3 Admission split<a class="headerlink" href="#53-admission-split" title="Permanent link">&para;</a></h3>
+<p>This design requires an explicit split between:</p>
+<ul>
+<li>residency admission</li>
+<li>CPU or GPU residency chosen and admitted by the shared executor and core memory system,</li>
+<li>retention admission</li>
+<li>stable retained CPU admission through existing stable-memory or cache policy hooks,</li>
+<li>capability admission and resolution</li>
+<li>local memfd/CUDA IPC and remote communicator-backed source eligibility continue to flow through existing export and
+    lease hooks and are resolved per consumer path,</li>
+<li>transport choice</li>
+<li>source resolution chooses shared loader, local handle, communicator-backed remote source, or chunk fallback.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>retained residency does not automatically imply local export,</li>
+<li>local export does not automatically imply remote communicator export,</li>
+<li>stable retention does not automatically imply local or remote export,</li>
+<li>the body layer must compose these existing mechanisms rather than fuse them into one new body-private state.</li>
+</ul>
+<h3 id="54-hard-rule-on-intent-vs-result">5.4 Hard rule on intent vs result<a class="headerlink" href="#54-hard-rule-on-intent-vs-result" title="Permanent link">&para;</a></h3>
+<ul>
+<li>authority code chooses <code>BodyBackingIntent</code>,</li>
+<li><code>ArtifactLoweringPlan</code> expresses the canonical execution request,</li>
+<li>core runtime decides the actual admissible result,</li>
+<li>body code records the resulting <code>BodyBackingObservation</code>,</li>
+<li>body code must not fabricate a stronger result than core actually admitted.</li>
+</ul>
+<p>This is the key rule that prevents <code>BodyBackingIntent</code> from becoming a second executor contract.</p>
+<h2 id="551-mapping-body-terms-onto-existing-core-contracts">5.5.1 Mapping body terms onto existing core contracts<a class="headerlink" href="#551-mapping-body-terms-onto-existing-core-contracts" title="Permanent link">&para;</a></h2>
+<p><code>0089</code> intentionally keeps the body vocabulary thin by forcing each body-facing concept to terminate in an existing core
+contract.</p>
+<table>
+<thead>
+<tr>
+<th>Body-side need</th>
+<th>Existing core contract / seam</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>local read</td>
+<td><code>StoreEngine::open_local_replica_loader(...)</code></td>
+</tr>
+<tr>
+<td>stable retention</td>
+<td><code>StoreEngine::admit_stable_cache_policy(...)</code> and retention registry policy flow</td>
+</tr>
+<tr>
+<td>local export</td>
+<td>existing handle lease paths plus <code>StoreEngine::set_replica_exported(...)</code></td>
+</tr>
+<tr>
+<td>remote export</td>
+<td><code>StoreEngine::enable_remote_replica_access(...)</code></td>
+</tr>
+<tr>
+<td>execution</td>
+<td><code>ArtifactLoweringPlan</code> + <code>execute_artifact_lowering_plan(...)</code></td>
+</tr>
+</tbody>
+</table>
+<p>Normative rule:</p>
+<ul>
+<li>if a body-facing flow cannot be explained through this table or an equivalent existing core seam, it is probably
+  inventing a parallel subsystem and should be redesigned.</li>
+</ul>
+<h3 id="56-shared-capability-to-source-resolution">5.6 Shared capability-to-source resolution<a class="headerlink" href="#56-shared-capability-to-source-resolution" title="Permanent link">&para;</a></h3>
+<p>All consumer paths for retained bodies must pass through one shared capability-resolution model before copy execution.</p>
+<p>Required resolution order by consumer need:</p>
+<ol>
+<li>resolve a standard local loader or source when the retained body is already local,</li>
+<li>resolve an existing local handle-lease path when the consumer is local and needs zero-copy CPU memfd or CUDA IPC,</li>
+<li>resolve a communicator-backed remote source when the body is remotely exportable,</li>
+<li>resolve bounded chunk fallback only when no shared source is available or when the object is intentionally tiny.</li>
+</ol>
+<p>Consequences:</p>
+<ul>
+<li><code>payload_ref</code> is one front-door capability into this layer, not the layer itself,</li>
+<li>local handle leases from <code>0049</code> and publish capabilities from <code>0082</code> are also front-door capabilities, not separate
+  data planes,</li>
+<li>region-backed and binding flows remain separate mutable placement boundaries, but they consume the same resolved source
+  family after validation.</li>
+</ul>
+<h3 id="57-inline-bytes">5.7 Inline bytes<a class="headerlink" href="#57-inline-bytes" title="Permanent link">&para;</a></h3>
+<p>Inline bytes are not part of the long-term retained-body model.</p>
+<p>They may remain as a bounded ingress or egress convenience for tiny objects, but:</p>
+<ul>
+<li>they must not be the canonical committed backing for normal high-cardinality bodies,</li>
+<li>they must not silently absorb ordinary payloads when core-backed staging was intended,</li>
+<li>they must remain observable and attributable when they appear.</li>
+</ul>
+<h2 id="6-invariant-and-digest-validation">6. Invariant and digest validation<a class="headerlink" href="#6-invariant-and-digest-validation" title="Permanent link">&para;</a></h2>
+<p>The common path now validates body invariants through <code>BodyDescriptor</code> rather than by rereading the body through the
+handle.</p>
+<p>Target rules:</p>
+<ul>
+<li>body staging computes or verifies digest exactly once for commit purposes,</li>
+<li>the verified digest is recorded in <code>BodyDescriptor</code>,</li>
+<li>authority commit and join paths compare invariants against <code>BodyDescriptor</code>,</li>
+<li>repeated full rereads through <code>BodyHandle</code> are reserved for debug, repair, or explicit fallback paths.</li>
+</ul>
+<p>Consequences:</p>
+<ul>
+<li><code>ArtifactProfileRuntime::validate_invariant_body_descriptor(...)</code> is descriptor-driven,</li>
+<li><code>payload_ref</code> issuance must consume descriptor metadata directly,</li>
+<li>body rereads must stop being the common-path proof mechanism.</li>
+</ul>
+<p>Additional implementation rule:</p>
+<ul>
+<li>shared lowering must continue returning verified content metadata needed to build <code>BodyDescriptor</code>,</li>
+<li>body code must not grow a second common-path verification result channel to avoid touching core.</li>
+</ul>
+<h2 id="7-local-export-and-external-target-interaction">7. Local export and external target interaction<a class="headerlink" href="#7-local-export-and-external-target-interaction" title="Permanent link">&para;</a></h2>
+<p>This design must stay aligned with existing local external-target and handle-export boundaries.</p>
+<p>Rules:</p>
+<ul>
+<li>local CPU zero-copy exposure continues to use the existing CPU memfd handle-lease path and
+  <code>HOST_SHARED</code> region registration when the caller supplies a mutable shared host window,</li>
+<li>local GPU zero-copy exposure continues to use the existing CUDA IPC and region/binding path,</li>
+<li>region-backed writes remain the only mutable external-target path for caller-owned local regions
+  (<code>VRAM</code> and <code>HOST_SHARED</code>),</li>
+<li><code>BodyStore</code> and <code>BodyHandle</code> must not introduce a second local-export protocol.</li>
+</ul>
+<p>Implication:</p>
+<ul>
+<li>retained body ownership and external target writes remain separate concerns,</li>
+<li><code>Binding</code> / region-backed flows keep owning mutable external-target semantics,</li>
+<li>body code only provides a core-backed source that those existing flows may consume.</li>
+</ul>
+<h2 id="8-remote-transfer-and-payload_ref-convergence">8. Remote transfer and <code>payload_ref</code> convergence<a class="headerlink" href="#8-remote-transfer-and-payload_ref-convergence" title="Permanent link">&para;</a></h2>
+<p><code>payload_ref</code> remains useful, but its long-term role must be narrowed.</p>
+<p>Target rules:</p>
+<ul>
+<li><code>payload_ref</code> is an authority-scoped capability and rendezvous primitive,</li>
+<li><code>payload_ref</code> is not the long-term remote dataplane; it is a front door into shared capability resolution plus a
+  bounded fallback path,</li>
+<li>resolving a <code>payload_ref</code> should converge to <code>ResolvedBodyCapability</code> and then to the shared source family, not to a
+  body-private transfer runtime,</li>
+<li>remote transfer resolution order should be:</li>
+<li>local <code>BodyHandle</code> -&gt; standard loader,</li>
+<li>remote exportable retained body -&gt; communicator-backed source such as <code>P2PSource</code>,</li>
+<li>chunk-RPC fallback when no shared remote source is available or when the object is intentionally tiny,</li>
+<li>batch-native <code>HomeBatchGet</code> communicator exports must consume the same <code>BodyHandle</code> export-view seam rather than
+  introducing a broker-private retained-body export path,</li>
+<li>large retained bodies must not remain permanently locked to chunk-RPC transport as their primary remote path.</li>
+</ul>
+<p>This is the key long-term convergence rule.</p>
+<p>Current chunked <code>FetchPayloadRefChunk</code> transport may remain as a transitional fallback, but it is not the desired
+steady-state transfer substrate for retained bodies.</p>
+<h2 id="9-lifecycle-and-ownership">9. Lifecycle and ownership<a class="headerlink" href="#9-lifecycle-and-ownership" title="Permanent link">&para;</a></h2>
+<h3 id="91-ownership-split">9.1 Ownership split<a class="headerlink" href="#91-ownership-split" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>BodyStore</code> owns authority-local visibility and retained-backing responsibility.</li>
+<li><code>BodyHandle</code> references core-owned backing.</li>
+<li><code>StoreEngine</code>, <code>ReplicaRuntime</code>, UMA, and existing lease/export systems own actual residency, export, and transfer
+  state.</li>
+</ul>
+<h3 id="92-retention-export-and-transfer-are-distinct-lifecycles">9.2 Retention, export, and transfer are distinct lifecycles<a class="headerlink" href="#92-retention-export-and-transfer-are-distinct-lifecycles" title="Permanent link">&para;</a></h3>
+<p>This distinction is mandatory and follows <code>0034</code> terminology:</p>
+<ul>
+<li>retention</li>
+<li>whether the body should remain available as authority-local backing,</li>
+<li>stable retention</li>
+<li>whether CPU residency is admitted into existing stable-memory accounting,</li>
+<li>local export</li>
+<li>whether memfd or CUDA IPC access has been granted to a local consumer,</li>
+<li>remote export</li>
+<li>whether communicator export or equivalent remote source capability is active,</li>
+<li>transfer</li>
+<li>whether bytes are currently moving through the shared dataplane or fallback transport.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>these lifecycles may interact, but they must not collapse into one body-private state machine.</li>
+</ul>
+<h3 id="93-retained-home-body-lifecycle">9.3 Retained home body lifecycle<a class="headerlink" href="#93-retained-home-body-lifecycle" title="Permanent link">&para;</a></h3>
+<p>For a retained home body:</p>
+<ol>
+<li>source is staged through <code>ArtifactLoweringPlan</code>,</li>
+<li>core runtime creates or reuses the chosen backing,</li>
+<li><code>BodyDescriptor</code> is produced,</li>
+<li><code>BodyStoreEntry</code> is committed,</li>
+<li>retention policy may request existing stable-memory admission if needed,</li>
+<li>local or remote export is requested only through existing export hooks when a consumer needs it,</li>
+<li>expiry, conflict, or explicit eviction retires the backing through existing core lifecycle APIs.</li>
+</ol>
+<h3 id="94-forwarder-lifecycle">9.4 Forwarder lifecycle<a class="headerlink" href="#94-forwarder-lifecycle" title="Permanent link">&para;</a></h3>
+<p>For a transient forwarding daemon:</p>
+<ol>
+<li>avoid staging a second retained body when a reusable core-backed source already exists,</li>
+<li>stage only the minimum body needed to satisfy forward progress,</li>
+<li>issue <code>payload_ref</code>,</li>
+<li>resolve remote movement through shared sources when possible,</li>
+<li>retire the local staging body after success or failure cleanup.</li>
+</ol>
+<p><code>TRANSIENT_FORWARD</code> must never silently become home retained truth.</p>
+<h3 id="941-future-convergence-for-transient-forwarding">9.4.1 Future convergence for transient forwarding<a class="headerlink" href="#941-future-convergence-for-transient-forwarding" title="Permanent link">&para;</a></h3>
+<p>Current routed byte-artifact remote-home <code>put</code> may still materialize transient per-item bodies and temporarily route
+them through the shared retained-body execution machinery as an implementation shortcut. That shape is acceptable as a
+transitional execution detail, but it is not the desired long-term architecture.</p>
+<p>Long-term convergence rule:</p>
+<ul>
+<li>transient forwarding bodies are transport-scoped execution objects, not retained store-owned truth,</li>
+<li>transient forwarding must not permanently depend on the global retained-body registry hot path,</li>
+<li>source-side remote-home <code>put</code> should converge toward direct source-bytes or source-region to pack, export, and
+  forward execution, without creating per-item retained-body registrations solely for forwarding,</li>
+<li>home-daemon verification, per-item outcome accounting, routed authority ownership, and final retained-backing
+  installation remain unchanged.</li>
+</ul>
+<p>This evolution changes execution shape only. It does not relax artifact identity, authority, verification, or
+home-install semantics.</p>
+<h3 id="95-state-machine">9.5 State machine<a class="headerlink" href="#95-state-machine" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; Staging
+  Staging --&gt; Verified: descriptor produced
+  Verified --&gt; Retained: authority commit created
+  Verified --&gt; Retired: commit rejected or cleanup
+  Retained --&gt; LocalExported: existing local export hook activated
+  Retained --&gt; RemoteExported: existing communicator export hook activated
+  LocalExported --&gt; Retained: export released
+  RemoteExported --&gt; Retained: export released
+  Retained --&gt; Expired: ttl or explicit eviction
+  Expired --&gt; Retired: core backing retired
+  Retired --&gt; [*]</code></pre>
+<p>Normative rules:</p>
+<ul>
+<li>only <code>Retained</code> state may be authority truth,</li>
+<li>export states are capability overlays on top of retained backing, not separate truth states,</li>
+<li><code>Retired</code> must call existing core retirement paths exactly once and idempotently.</li>
+</ul>
+<h2 id="10-memory-tier-interaction-and-observability">10. Memory-tier interaction and observability<a class="headerlink" href="#10-memory-tier-interaction-and-observability" title="Permanent link">&para;</a></h2>
+<p>This design depends on existing memory-tier and export accounting. It does not invent new budget systems.</p>
+<p>Required rules:</p>
+<ul>
+<li>CPU retained bodies that require stable availability must use existing stable-memory admission hooks,</li>
+<li>GPU retained bodies must remain visible to existing VRAM accounting and eviction machinery,</li>
+<li>local memfd and CUDA IPC export must continue to use existing handle-lease and export-pin semantics,</li>
+<li>remote transfer eligibility must continue to use existing communicator-export state and accounting,</li>
+<li><code>BodyStore</code> capacity logic must cooperate with, not replace, core memory-tier accounting.</li>
+</ul>
+<p>Observability must also preserve repository-wide terminology from <code>0034</code>:</p>
+<ul>
+<li>do not use ambiguous names that blur stable lease, export pin, and pinned pool,</li>
+<li>record both intent and observed outcome,</li>
+<li>record transfer resolution mode separately from retention state.</li>
+</ul>
+<p>Recommended first metrics:</p>
+<ul>
+<li><code>tc_body_intent_total{access_class=..., preferred_residency=..., retention=...}</code></li>
+<li><code>tc_body_observation_total{location=..., local_export=..., remote_transfer=..., stable_retention=...}</code></li>
+<li><code>tc_body_transfer_resolution_total{mode="local_loader|communicator|chunk_rpc"}</code></li>
+<li><code>tc_body_validation_mode_total{mode="descriptor|reread"}</code></li>
+<li><code>tc_body_retirements_total{reason=...}</code></li>
+</ul>
+<h2 id="11-migration-stance">11. Migration stance<a class="headerlink" href="#11-migration-stance" title="Permanent link">&para;</a></h2>
+<p>This repository is pre-launch, so <code>0089</code> should optimize for the target architecture rather than for preserving current
+internal shapes.</p>
+<p>Normative stance:</p>
+<ul>
+<li>no new compatibility-driven body-private abstraction should be introduced,</li>
+<li>no new long-lived duplicate data path should be accepted just to ease transition,</li>
+<li>the primary retained-body path must stay on the hard-cut model landed by <code>0089</code>,</li>
+<li>any remaining fallback-oriented duplication is follow-up cleanup, not a second supported semantics line.</li>
+</ul>
+<p>That means:</p>
+<ul>
+<li>design for the hard-cut target first,</li>
+<li>land the cut,</li>
+<li>then keep remaining remote-source and policy-surface convergence work explicitly outside the <code>0089</code> scope.</li>
+</ul>
+<h2 id="12-alternatives-considered">12. Alternatives considered<a class="headerlink" href="#12-alternatives-considered" title="Permanent link">&para;</a></h2>
+<h3 id="121-keep-a-body-private-target-enum-as-the-main-abstraction">12.1 Keep a body-private target enum as the main abstraction<a class="headerlink" href="#121-keep-a-body-private-target-enum-as-the-main-abstraction" title="Permanent link">&para;</a></h3>
+<p>Rejected because it mixes:</p>
+<ul>
+<li>residency,</li>
+<li>exportability,</li>
+<li>retention,</li>
+<li>and fallback outcome</li>
+</ul>
+<p>into one body-specific type that does not match core contracts.</p>
+<h3 id="122-keep-payload_ref-chunk-rpc-as-the-long-term-primary-remote-data-path">12.2 Keep <code>payload_ref</code> chunk RPC as the long-term primary remote data path<a class="headerlink" href="#122-keep-payload_ref-chunk-rpc-as-the-long-term-primary-remote-data-path" title="Permanent link">&para;</a></h3>
+<p>Rejected because it would preserve a second transfer line for routed bodies and underuse existing communicator, export,
+and shared-source infrastructure.</p>
+<h3 id="123-make-inline-tiny-object-storage-part-of-the-canonical-retained-body-model">12.3 Make inline tiny-object storage part of the canonical retained-body model<a class="headerlink" href="#123-make-inline-tiny-object-storage-part-of-the-canonical-retained-body-model" title="Permanent link">&para;</a></h3>
+<p>Rejected because it would preserve a daemon-private byte-storage contract and blur the line between convenience fallback
+and retained backing truth.</p>
+<h3 id="124-move-policy-selection-entirely-into-corestore">12.4 Move policy selection entirely into <code>core/store</code><a class="headerlink" href="#124-move-policy-selection-entirely-into-corestore" title="Permanent link">&para;</a></h3>
+<p>Rejected because access class and retention intent depend on authority semantics above the dataplane.</p>
+<h3 id="125-preserve-reread-based-invariant-validation-permanently">12.5 Preserve reread-based invariant validation permanently<a class="headerlink" href="#125-preserve-reread-based-invariant-validation-permanently" title="Permanent link">&para;</a></h3>
+<p>Rejected because it keeps common-path correctness tied to repeated body rereads and blocks descriptor-driven validation.</p>
+<h2 id="13-naming-compliance">13. Naming compliance<a class="headerlink" href="#13-naming-compliance" title="Permanent link">&para;</a></h2>
+<p>The new interfaces proposed in this design follow repository naming rules.</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BodyAccessClass</code></td>
+<td>C++ enum/class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyBackingIntent</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyBackingObservation</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyDescriptor</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyBackingManager</code></td>
+<td>C++ class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>choose_backing_intent</code></td>
+<td>C++ method</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>derive_backing_observation</code></td>
+<td>C++ method</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>open_body_loader</code></td>
+<td>C++ method</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h2 id="14-post-cut-follow-ups">14. Post-Cut Follow-ups<a class="headerlink" href="#14-post-cut-follow-ups" title="Permanent link">&para;</a></h2>
+<ul>
+<li>extend remote <code>payload_ref</code> resolution from chunk-RPC fallback to communicator-backed shared remote sources where
+  applicable,</li>
+<li>converge future publish and retention capabilities onto the same shared capability-resolution seam,</li>
+<li>decide whether communicator export for retained bodies should stay fully demand-driven or gain selected eager paths for
+  specific access classes,</li>
+<li>continue tightening tiny-object inline fallback so it remains a bounded convenience path rather than an attractive
+  secondary contract.</li>
+</ul>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>No durable schema changes are required for this design.</p>
+<p>This design changes:</p>
+<ul>
+<li>in-memory retained-body ownership shape,</li>
+<li>daemon/core policy boundaries,</li>
+<li>runtime transfer and export convergence expectations,</li>
+</ul>
+<p>but not:</p>
+<ul>
+<li>Global Store durable state,</li>
+<li>structured artifact schema,</li>
+<li>protocol-mandated persistent metadata.</li>
+</ul>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>This design is stricter than the previous <code>0089</code> draft. It improves long-term consistency, but it requires clearer core
+  observation hooks, a shared verified-content output at the lowering seam, and tighter layering discipline.</li>
+<li>Descriptor-driven validation removes rereads from the common path, but it requires atomic descriptor production and
+  careful failure cleanup.</li>
+<li>Converging remote body transfer toward shared capability resolution plus shared sources is the correct long-term
+  architecture, but it increases the scope of the initial refactor relative to simply keeping chunk RPC forever.</li>
+<li>CPU retained bodies remain sensitive to stable-memory and memfd configuration quality.</li>
+<li>GPU retained bodies remain sensitive to VRAM pressure and must stay policy-restricted.</li>
+<li>If retention, export, and transfer are not kept separate in implementation, the design will drift back into a
+  body-private lifecycle model despite the document saying otherwise.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Compatibility stance:</p>
+<ul>
+<li><code>0088</code> lowering and routing behavior remains the baseline,</li>
+<li>no new parallel dataplane is introduced,</li>
+<li>no Global Store hot-path expansion is introduced,</li>
+<li>internal compatibility concerns do not justify preserving body-private steady-state logic.</li>
+</ul>
+<p>Acceptance criteria:</p>
+<ul>
+<li><code>byte_artifact</code> remains an <code>Artifact</code> profile rather than a parallel object model.</li>
+<li><code>BodyDescriptor</code> stores verified content truth only and becomes the common-path validation source.</li>
+<li><code>BodyBackingIntent</code> and <code>BodyBackingObservation</code> are explicit and centrally owned above shared execution.</li>
+<li>retained-body capability resolution converges to one shared capability-to-source or handle layer rather than to
+  protocol-private transfer logic.</li>
+<li><code>BodyStore</code> stores descriptor plus handle and remains a retained-backing index rather than a byte heap.</li>
+<li>retained-body policy no longer depends on controller-local hard-coded CPU staging.</li>
+<li>local export, stable retention, and remote transfer continue to use existing core APIs and terminology.</li>
+<li><code>payload_ref</code> is explicitly treated as capability and rendezvous, not as the desired long-term primary transfer engine
+  for large retained bodies.</li>
+<li>common-path invariant validation no longer depends on rereading the full body through <code>compute_sha256_hex()</code>.</li>
+<li>body retirement flows through existing core lifecycle APIs.</li>
+<li>no new daemon-local copy, export, or transfer runtime is introduced.</li>
+</ul>
+<p>Repository searches expected to converge:</p>
+<ul>
+<li><code>rg -n "compute_sha256_hex\\(" daemon/service/artifact_profile_registry.cc daemon/service/controllers/byte_artifact_controller.cc</code></li>
+<li>expected result: no common-path validation dependency remains</li>
+<li><code>rg -n "build_body_lowering_plan|stage_loader_to_body" daemon/service/controllers/byte_artifact_controller.cc</code></li>
+<li>expected result: no controller-local retained-backing owner remains</li>
+<li><code>rg -n "BodyHandle::Kind" daemon/service</code></li>
+<li>expected result: no new body-private backing taxonomy grows under <code>BodyHandle</code></li>
+<li><code>rg -n "std::shared_ptr&lt;const std::string&gt;|payload = .*std::string" daemon/service/byte_artifact_body_store.*</code></li>
+<li>expected result: no primary retained-body byte heap remains</li>
+<li><code>rg -n "FetchPayloadRefChunk|chunk_rpc" daemon/service docs/designs/0089-core-backed-body-handles-and-backing-policy.md</code></li>
+<li>expected result: chunk transport is documented or implemented as fallback, not as the canonical long-term remote
+    path</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><a href="../0034-stable-memory-tiers/">0034 Stable Memory Tiers</a></li>
+<li><a href="../0039-artifact-first-sdk/">0039 Artifact-First TensorCast SDK</a></li>
+<li><a href="../0049-cpu-shared-memory-materialization/">0049 CPU Shared Memory Materialization</a></li>
+<li><a href="../0055-programmable-framework/">0055 Programmable API Design (Artifact-First)</a></li>
+<li><a href="../0078-selection-first-artifact-retrieval/">0078 Selection-First Artifact Retrieval And Materialization</a></li>
+<li><a href="../0082-cpu-memfd-zero-copy-publish/">0082 CPU Memfd Zero-Copy Stable DRAM Publish</a></li>
+<li><a href="../0087-unified-artifact-runtime-and-routed-byte-artifact-architecture/">0087 Unified Artifact Runtime and Routed Byte Artifact Architecture</a></li>
+<li><a href="../0088-unified-artifact-profiles-with-shared-dataplane/">0088 Unified Artifact Profiles with Shared Dataplane</a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

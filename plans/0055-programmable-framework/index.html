@@ -1,0 +1,2593 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/plans/0055-programmable-framework/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Plan - Programmable API Design (Artifact-First) - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#objective" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Plan - Programmable API Design (Artifact-First)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#api-consistency-rules-required" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API Consistency Rules (required)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="objective">Objective<a class="headerlink" href="#objective" title="Permanent link">&para;</a></h1>
+<p>Implement the programmable, artifact-first control-plane primitives defined in <code>docs/designs/0055-programmable-framework.md</code>:</p>
+<ul>
+<li><code>CallContext</code>: per-call QoS/deadline/idempotency/tags</li>
+<li><code>Operation[T]</code>: unified sync/blocking status/wait/cancel (Phase-0: no <code>async def</code> / <code>await</code> SDK surface)</li>
+<li><code>pin_device_residency</code>: process-independent device residency intent (placement pins)</li>
+<li><code>Plan</code>: orchestration IR (worker-first, instance steps via node-local agents)</li>
+</ul>
+<h2 id="api-consistency-rules-required">API Consistency Rules (required)<a class="headerlink" href="#api-consistency-rules-required" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>CallContext</code> is a pure data container (no <code>ctx.artifact()</code> / <code>ctx.plan()</code> helpers).</li>
+<li>Handle construction is always context-free: <code>tensorcast.artifact(...)</code> / <code>store.artifact(...)</code>.</li>
+<li><code>ctx</code> is always passed explicitly as an action parameter: all RPC/scheduling actions accept <code>*, ctx: CallContext | None = None</code> (keyword-only).</li>
+<li><code>ctx</code> does not participate in artifact/view/selection identity; only <code>ctx.idempotency_key</code> may seed deterministic operation ids (deadline/qos/tags must never affect identity).</li>
+<li>Plan is the only exception: <code>tensorcast.plan(ctx)</code> binds <code>ctx</code> once; step builder methods do not accept <code>ctx</code>.</li>
+</ul>
+<h1 id="status-2026-01-24">Status (2026-01-24)<a class="headerlink" href="#status-2026-01-24" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Completed Phases 0–3 end-to-end (protos, daemon RPCs/semantics, SDK <code>CallContext</code>/<code>Operation</code>/<code>prefetch</code>/<code>pin_device_residency</code>, Global Store <code>daemon_id</code> identity).</li>
+<li>Phase 4 is complete: PlanSpec + node agent execution (worker + instance steps) + engine adapter registry are implemented.</li>
+<li>Instance registry and Node Agent runtime config are implemented and wired through the Global Store and unified config system.</li>
+<li>Worker registration invariants are enforced end-to-end (required <code>daemon_id</code>, endpoint conflict checks independent of <code>node_id</code>,
+  <code>daemon_id</code> persisted as NOT NULL).</li>
+</ul>
+<h1 id="prior-state-grounding-before-implementation">Prior State &amp; Grounding (before implementation)<a class="headerlink" href="#prior-state-grounding-before-implementation" title="Permanent link">&para;</a></h1>
+<ul>
+<li>SDK:</li>
+<li><code>Artifact.prefetch(...) -&gt; Operation[PrefetchedReplica]</code> with operation-scoped wait/cancel/status; no legacy ticket
+    wrapper remains.</li>
+<li><code>tensorcast/api/_materialize.py</code> sends <code>lease_mode=NO_LEASE</code> for prefetch to avoid PID-scoped leases.</li>
+<li>Daemon:</li>
+<li><code>proto/tensorcast/daemon/v2/store_daemon.proto</code> defines <code>QueryReplicaStatus</code> and <code>ReleaseReplica</code> RPCs, but
+    <code>daemon/service/grpc_service_impl.h</code> does not override them, so calls are <code>UNIMPLEMENTED</code>.</li>
+<li><code>daemon/state/replica_session_manager.h</code> overwrites <code>replica_uuid -&gt; ReplicaKey</code> on <code>put(...)</code>; deterministic ids
+    are unsafe without PutIfAbsent/JoinIfMatch semantics.</li>
+<li><code>daemon/service/controllers/materialization_controller.cc</code> is explicit that PID-coupled paths are loopback-only
+    (<code>wait_for_completion</code> and <code>MaterializeIntoTarget</code>).</li>
+<li><code>daemon/state/session_lifecycle.h</code> already supports placement pinning via
+    <code>SessionLifecycleManager::create_placement_lease(...)</code>, but it is not exposed via RPC and has no capability token
+    model.</li>
+<li>Global Store:</li>
+<li><code>proto/tensorcast/global_store/v1/global_store.proto</code> has worker identity via <code>worker_id</code>, but no stable <code>daemon_id</code>.</li>
+<li><code>schema.sql</code> stores <code>workers(worker_id, node_id, node_address, grpc_port, ...)</code> with a uniqueness constraint on
+    <code>(node_address, grpc_port)</code>, which makes address/port part of identity.</li>
+<li>Python service code is in <code>tensorcast/global_store/grpc_service.py</code> + <code>tensorcast/global_store/services/worker_service.py</code>.</li>
+<li>Daemon HA registration is in <code>daemon/ha/worker_lifecycle_manager.cc</code> via <code>core/store/components/global_store_client.*</code>.</li>
+</ul>
+<h1 id="work-breakdown-by-area">Work Breakdown by Area<a class="headerlink" href="#work-breakdown-by-area" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>Protos</strong></li>
+<li>Common: <code>proto/tensorcast/common/v1/common.proto</code></li>
+<li>Daemon: <code>proto/tensorcast/daemon/v2/store_daemon.proto</code></li>
+<li>Global Store: <code>proto/tensorcast/global_store/v1/global_store.proto</code></li>
+<li>PlanSpec: <code>proto/tensorcast/plan/v1/plan.proto</code></li>
+<li>Node Agent: <code>proto/tensorcast/node_agent/v1/node_agent.proto</code></li>
+<li>Node Agent config: <code>proto/tensorcast/config/v1/node_agent_config.proto</code></li>
+<li>(Optional but recommended) Daemon config identity: <code>proto/tensorcast/config/v1/daemon_config.proto</code></li>
+<li><strong>Daemon (C++)</strong></li>
+<li>gRPC surface: <code>daemon/service/grpc_service_impl.{h,cc}</code></li>
+<li>Materialization + lease semantics: <code>daemon/service/controllers/materialization_controller.cc</code></li>
+<li>Operation/session state: <code>daemon/state/replica_session_manager.h</code>, <code>daemon/state/session_lifecycle.{h,cc}</code></li>
+<li>HA registration: <code>daemon/ha/worker_lifecycle_manager.{h,cc}</code>, <code>core/store/components/global_store_client.{h,cc}</code></li>
+<li><strong>SDK (Python)</strong></li>
+<li>Context/operation primitives: <code>tensorcast/api/context.py</code>, <code>tensorcast/api/operation.py</code></li>
+<li>Artifact handle changes: <code>tensorcast/api/store/artifact.py</code>, <code>tensorcast/api/_materialize.py</code></li>
+<li>Daemon RPC client: <code>tensorcast/daemon_ctl.py</code></li>
+<li><strong>Global Store (Python)</strong></li>
+<li>Schema: <code>schema.sql</code></li>
+<li>Models/repos: <code>tensorcast/global_store/models/worker.py</code>, <code>tensorcast/global_store/repositories/worker_repository.py</code></li>
+<li>Service layer: <code>tensorcast/global_store/services/worker_service.py</code>, <code>tensorcast/global_store/grpc_service.py</code></li>
+<li>Instance registry: <code>tensorcast/global_store/models/instance.py</code>,
+    <code>tensorcast/global_store/repositories/instance_repository.py</code>,
+    <code>tensorcast/global_store/services/instance_service.py</code></li>
+</ul>
+<h1 id="phases-milestones">Phases &amp; Milestones<a class="headerlink" href="#phases-milestones" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Phase 0: Proto scaffolding + codegen (additive-only)</li>
+<li>[x] Milestone 0.1: Daemon proto for <code>NO_LEASE</code> + operation waits<ul>
+<li>[x] Add <code>LeaseMode</code> enum (or equivalent) and <code>lease_mode</code> fields to <code>MaterializeReplicaRequest</code> and
+  <code>MaterializeByKeyRequest</code> in <code>proto/tensorcast/daemon/v2/store_daemon.proto</code>.</li>
+<li>[x] Add <code>WaitReplicaStatus</code> RPC + request/response messages in <code>proto/tensorcast/daemon/v2/store_daemon.proto</code>
+  (prefer server-streaming; acceptable alternative is long-poll unary).</li>
+<li>[x] Add placement lease RPCs + messages in <code>proto/tensorcast/daemon/v2/store_daemon.proto</code>:
+  <code>CreatePlacementLease</code>, <code>RenewPlacementLease</code>, <code>ReleasePlacementLease</code> returning/accepting <code>lease_token</code> (SDK surfaces it as <code>PlacementPin.capability_token</code>).</li>
+<li>[x] Add <code>WaitPersistenceStatus</code> RPC in <code>proto/tensorcast/daemon/v2/store_daemon.proto</code> (Phase-1; mirrors
+  <code>WaitReplicaStatus</code> to avoid polling storms).</li>
+</ul>
+</li>
+<li>[x] Milestone 0.2: Global Store proto for stable daemon identity<ul>
+<li>[x] Add <code>daemon_id</code> to <code>RegisterWorkerRequest</code> and <code>ListActiveWorkersResponse.WorkerInfo</code> in
+  <code>proto/tensorcast/global_store/v1/global_store.proto</code>.</li>
+<li>[x] Decide whether <code>WorkerHeartbeatRequest</code> needs <code>daemon_id</code> (recommended: keep heartbeat by <code>worker_id</code>, but
+  allow optional <code>daemon_id</code> for sanity-check logging).</li>
+</ul>
+</li>
+<li>[x] Milestone 0.3: (Optional) Daemon config identity<ul>
+<li>[x] If <code>daemon_id</code> is not derivable safely from existing fields, add an explicit <code>daemon_id</code> config field to
+  <code>proto/tensorcast/config/v1/daemon_config.proto</code> and plumb it through YAML/JSON config parsing (must follow
+  <code>docs/designs/0004-unified-runtime-config.md</code>).</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 0.4: Regenerate + validate protos</p>
+<ul>
+<li>[x] Run <code>bash tools/build_proto_python.sh</code> (required after any <code>.proto</code> changes).</li>
+<li>[x] Run <code>bazel test //proto/... --test_output=streamed</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 1: Daemon operation tracking + <code>NO_LEASE</code> (C++)</p>
+</li>
+<li>[x] Milestone 1.1: PutIfAbsent/JoinIfMatch for <code>replica_uuid</code> operation records<ul>
+<li>[x] Replace overwriting <code>ReplicaSessionManager::put(...)</code> with PutIfAbsent/JoinIfMatch semantics in
+  <code>daemon/state/replica_session_manager.h</code> (reject mismatched reuse with <code>FAILED_PRECONDITION</code>).</li>
+<li>[x] Make session entries carry enough identity for join validation (at minimum <code>ReplicaKey</code>; recommended:
+  <code>replica_key_hash</code> for diagnostics).</li>
+<li>[x] Update <code>daemon/state/sessions_service.h</code> call sites accordingly (avoid silent overwrite).</li>
+<li>[x] Add a focused test: new <code>daemon/state/replica_session_manager_join_semantics_test.cc</code> + target in <code>daemon/BUILD</code>.</li>
+<li>Run: <code>bazel test //daemon:replica_session_manager_join_semantics_test</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 1.2: <code>NO_LEASE</code> materialization semantics<ul>
+<li>[x] Implement <code>lease_mode=NO_LEASE</code> behavior in <code>daemon/service/controllers/materialization_controller.cc</code>:</li>
+<li>never mint IPC handle leases (<code>MemCopyHandle.lease_token</code>)</li>
+<li>never create PID use leases (<code>SessionLifecycleManager::create_use_lease</code>)</li>
+<li>ignore <code>pid</code> even for loopback peers (treat as <code>effective_pid=0</code>)</li>
+<li>omit <code>mem_handle</code> (or return an explicit empty handle) for <code>NO_LEASE</code> requests</li>
+<li>[x] Add daemon tests for <code>NO_LEASE</code> behavior:</li>
+<li>New: <code>daemon/service/grpc_service_impl_no_lease_materialize_test.cc</code> (or equivalent) + target in <code>daemon/BUILD</code>.</li>
+<li>Run: <code>bazel test //daemon:grpc_service_impl_no_lease_materialize_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 1.3: Operation-scoped status/wait/cancel RPCs<ul>
+<li>[x] Implement RPC handlers in <code>daemon/service/grpc_service_impl.{h,cc}</code>:</li>
+<li><code>QueryReplicaStatus</code></li>
+<li><code>ReleaseReplica</code> (operation-scoped; must not unload replicas globally)</li>
+<li><code>WaitReplicaStatus</code></li>
+<li>[x] Factor logic into a controller if needed:</li>
+<li>Option A: extend <code>daemon/service/controllers/status_controller.{h,cc}</code></li>
+<li>Option B (preferred for cohesion): add <code>daemon/service/controllers/replica_ticket_controller.{h,cc}</code></li>
+<li>[x] Add tests:</li>
+<li>New: <code>daemon/service/grpc_service_impl_replica_status_test.cc</code> verifying Query/Wait/Release semantics.</li>
+<li>Run: <code>bazel test //daemon:grpc_service_impl_replica_status_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 1.4: Placement lease RPCs + capability tokens</p>
+<ul>
+<li>[x] Implement <code>CreatePlacementLease</code>/<code>RenewPlacementLease</code>/<code>ReleasePlacementLease</code> in
+  <code>daemon/service/grpc_service_impl.{h,cc}</code>.</li>
+<li>[x] Build a daemon-scoped capability model:</li>
+<li>Option A: maintain a token→lease-id map in a new module <code>daemon/state/placement_lease_tokens.{h,cc}</code> with TTL.</li>
+<li>Option B: encode a MAC/signed token (requires a daemon secret; store in unified config).</li>
+<li>[x] Wire to lifecycle: <code>daemon/state/session_lifecycle.{h,cc}</code> (<code>create_placement_lease</code>, <code>renew_placement</code>,
+  <code>release_lease</code>).</li>
+<li>[x] Add tests:</li>
+<li>New: <code>daemon/service/grpc_service_impl_placement_lease_test.cc</code> (token required; renew/release fail on invalid).</li>
+<li>Run: <code>bazel test //daemon:grpc_service_impl_placement_lease_test --test_env=TENSORCAST_CUDA_BACKEND=fake</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 2: SDK surfaces (<code>CallContext</code>, <code>Operation</code>, <code>prefetch</code>, <code>pin_device_residency</code>)</p>
+</li>
+<li>[x] Milestone 2.1: <code>CallContext</code> plumbing<ul>
+<li>[x] Add <code>tensorcast/api/context.py</code> (<code>CallContext</code>, <code>tensorcast.context(...)</code>) and re-export from <code>tensorcast/__init__.py</code>.</li>
+<li>[x] Keep <code>CallContext</code> as a pure data container: do not add <code>CallContext.artifact()</code> or accept <code>ctx</code> in <code>tensorcast.artifact(...)</code> / <code>Store.artifact(...)</code>.</li>
+<li>[x] Thread <code>ctx</code> through <code>tensorcast/api/_materialize.py</code> materialization entry points (deadlines, tags, idempotency).</li>
+<li>[x] Add tests: <code>tests/python/api/test_call_context.py</code>.</li>
+<li>Run: <code>uv run pytest tests/python/api/test_call_context.py</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 2.2: <code>Operation[T]</code> primitive (sync/blocking only)<ul>
+<li>[x] Add <code>tensorcast/api/operation.py</code> defining <code>Operation[T]</code> + status/error models from the design.</li>
+<li>[x] Implement at least one concrete backend:</li>
+<li><code>DaemonReplicaOperation</code> (uses <code>WaitReplicaStatus</code>, <code>QueryReplicaStatus</code>, <code>ReleaseReplica</code>)</li>
+<li><code>PollingOperation</code> for persistence (Phase-0)</li>
+<li>[x] Add tests: <code>tests/python/api/test_operation_semantics.py</code>.</li>
+<li>Run: <code>uv run pytest tests/python/api/test_operation_semantics.py</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 2.3: <code>Artifact.prefetch(...) -&gt; Operation[PrefetchedReplica]</code><ul>
+<li>[x] Update <code>tensorcast/api/store/artifact.py</code>:</li>
+<li>change return type and remove the legacy tuple contract</li>
+<li>compute deterministic <code>replica_uuid</code> when <code>ctx.idempotency_key</code> is set</li>
+<li>default <code>lease_mode=NO_LEASE</code></li>
+<li>[x] Update <code>tensorcast/api/_materialize.py</code> + <code>tensorcast/daemon_ctl.py</code> to send/handle <code>lease_mode</code> and call
+  <code>WaitReplicaStatus</code>.</li>
+<li>[x] Remove <code>PrefetchTicket</code> legacy wrapper from <code>tensorcast/api/store/batch_context.py</code></li>
+<li>[x] Add/adjust tests:</li>
+<li>Add <code>tests/python/api/test_prefetch_operation.py</code></li>
+<li>Update <code>tests/python/api/test_public_surface.py</code> for new API surface</li>
+<li>Run: <code>TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/api/test_prefetch_operation.py</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 2.4: <code>pin_device_residency</code> SDK API<ul>
+<li>[x] Implement <code>Artifact.pin_device_residency(...) -&gt; Operation[PlacementPin]</code> in <code>tensorcast/api/store/artifact.py</code>.</li>
+<li>[x] Implement <code>PlacementPin.renew/release</code> calling daemon placement pin RPCs via <code>tensorcast/daemon_ctl.py</code>.</li>
+<li>[x] Add tests: <code>tests/python/api/test_placement_pin.py</code>.</li>
+<li>Run: <code>TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/api/test_placement_pin.py</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 2.5: Lint/type checks</p>
+<ul>
+<li>[x] Run <code>uv run ruff check .</code> and <code>uv run ruff format .</code>.</li>
+<li>[x] Run <code>uv run mypy ./tensorcast</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 3: Global Store stable worker identity (<code>daemon_id</code>) + schema</p>
+</li>
+<li>[x] Milestone 3.1: Schema changes (<code>schema.sql</code>)<ul>
+<li>[x] Add <code>daemon_id</code> column to <code>workers</code> plus a uniqueness constraint/index (DuckDB-compatible, NOT NULL).</li>
+<li>[x] Update <code>tests/python/global_store/test_schema_persistence.py</code> expectations if needed.</li>
+</ul>
+</li>
+<li>[x] Milestone 3.2: Global Store service plumbing (Python)<ul>
+<li>[x] Update worker model + repo:</li>
+<li><code>tensorcast/global_store/models/worker.py</code> (add <code>daemon_id</code>)</li>
+<li><code>tensorcast/global_store/repositories/worker_repository.py</code> (SELECT/INSERT/UPDATE, add <code>find_by_daemon_id</code>)</li>
+<li>[x] Update registration logic to treat <code>daemon_id</code> as stable identity:</li>
+<li><code>tensorcast/global_store/services/worker_service.py</code> (prefer <code>daemon_id</code> for upsert; allow address changes)</li>
+<li><code>tensorcast/global_store/grpc_service.py</code> (plumb proto fields; return <code>daemon_id</code> in ListActiveWorkers)</li>
+<li>[x] Add/adjust tests:</li>
+<li><code>tests/python/global_store/test_grpc_service.py</code></li>
+<li><code>tests/python/global_store/test_repositories.py</code></li>
+<li>Run: <code>uv run pytest tests/python/global_store/...</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 3.3: Daemon HA registration includes <code>daemon_id</code> (C++)</p>
+<ul>
+<li>[x] Plumb <code>daemon_id</code> through daemon options/config:</li>
+<li>daemon wiring: <code>daemon/app/*</code> (composition root)</li>
+<li>config parsing: <code>tensorcast/api/_config.py</code> (if Python-side config helpers involved) and/or daemon C++ config load</li>
+<li>[x] Include <code>daemon_id</code> in Global Store registration:</li>
+<li><code>core/store/components/global_store_client.{h,cc}</code> (RegisterWorkerRequest)</li>
+<li><code>daemon/ha/worker_lifecycle_manager.{h,cc}</code></li>
+<li>[x] Update HA tests:</li>
+<li><code>daemon/ha/worker_lifecycle_manager_sync_test.cc</code> assertions to validate <code>daemon_id</code> propagation.</li>
+<li>Run: <code>bazel test //daemon:worker_lifecycle_manager_sync_test</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 4: PlanSpec + node-local agents + engine adapter capabilities</p>
+</li>
+<li>[x] Milestone 4.1: PlanSpec (versioned IR)<ul>
+<li>[x] Define <code>PlanSpec</code> proto (new): <code>proto/tensorcast/plan/v1/plan.proto</code> (or similar) and generate code.</li>
+<li>[x] Implement <code>tensorcast/api/plan/plan.py</code> + <code>Plan.to_spec()</code> producing deterministic fingerprints based on
+  <code>(logical_layout_hash, selection_hash)</code> and stable target identities (<code>daemon_id</code>, <code>instance_id</code>).</li>
+</ul>
+</li>
+<li>[x] Milestone 4.2: Node-local agent service (worker + instance steps)<ul>
+<li>[x] Define agent RPC proto (new): <code>proto/tensorcast/node_agent/v1/node_agent.proto</code>.</li>
+<li>[x] Implement node agent (Python service recommended in v1):</li>
+<li><code>tensorcast/node_agent/server.py</code> (new)</li>
+<li><code>tensorcast/node_agent/executor.py</code> (Plan step execution; talks to daemon + engine adapter)</li>
+</ul>
+</li>
+<li>[x] Milestone 4.3: Engine adapter capabilities<ul>
+<li>[x] Define <code>TargetSpec</code> mint/resolve API data model at the engine boundary and implement capability validation in the SDK layer.</li>
+<li>[x] Implement <code>TransformSpec</code> plugin registry and execution hooks at node-local boundary.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.4: Instance registry + Node Agent config<ul>
+<li>[x] Add Global Store instance registry (schema + repo + service + RPCs).</li>
+<li>[x] Add Node Agent unified config (<code>NodeAgentConfig</code>) + entrypoint.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.5: Plan execution integration tests<ul>
+<li>[x] Add Node Agent PlanSpec execution tests (success + failure/cancel paths).</li>
+</ul>
+</li>
+</ul>
+<h1 id="phase-5-contracts-as-tests-checklist-post-implementation-hardening">Phase 5: Contracts-as-Tests Checklist (post-implementation hardening)<a class="headerlink" href="#phase-5-contracts-as-tests-checklist-post-implementation-hardening" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] C5.1 Prefetch operation identity (no implicit UUID fan-out)</li>
+<li>[x] Always send a non-empty <code>replica_uuid</code> for <code>Artifact.prefetch(...)</code>, even when <code>ctx.idempotency_key</code> is absent
+        (per-call UUID reused across internal retries).<ul>
+<li>Code: <code>tensorcast/api/store/artifact.py</code></li>
+<li>Test: <code>tests/python/api/test_prefetch_operation.py</code> (new case for no-ctx prefetch).</li>
+</ul>
+</li>
+<li>[x] C5.2 CPU prefetch semantics are explicit and documented</li>
+<li>[x] Reject CPU prefetch in the SDK when <code>lease_mode=NO_LEASE</code> (avoid daemon-side INVALID_ARGUMENT).<ul>
+<li>Code: <code>tensorcast/api/store/artifact.py</code></li>
+<li>Tests: <code>tests/python/api/test_artifact_handle.py</code> (update), <code>tests/python/api/test_prefetch_operation.py</code> (ensure GPU path remains OK).</li>
+</ul>
+</li>
+<li>[x] Update docs to reflect CPU prefetch behavior.<ul>
+<li>Docs: <code>tensorcast/api/store/README.md</code>, <code>tensorcast/api/README.md</code>, <code>docs/designs/0055-programmable-framework.md</code></li>
+</ul>
+</li>
+<li>[x] C5.3 CallContext deadline budget is enforced end-to-end</li>
+<li>[x] Clamp materialization retry budgets to <code>ctx.deadline_ms</code> and propagate per-RPC timeouts.<ul>
+<li>Code: <code>tensorcast/api/store/materialization.py</code></li>
+</ul>
+</li>
+<li>[x] Polling operations respect <code>ctx.deadline_ms</code> (persistence + placement pin).<ul>
+<li>Code: <code>tensorcast/api/operation.py</code>, <code>tensorcast/api/store/__init__.py</code>, <code>tensorcast/api/store/artifact.py</code></li>
+<li>Test: <code>tests/python/api/test_operation_semantics.py</code> (new polling deadline case).</li>
+</ul>
+</li>
+<li>[x] Node Agent worker actions propagate <code>ctx.deadline_ms</code> to daemon RPC timeouts.<ul>
+<li>Code: <code>tensorcast/node_agent/executor.py</code>, <code>tensorcast/daemon_ctl.py</code></li>
+<li>Test: <code>tests/python/node_agent/test_plan_execution.py</code> (new timeout propagation cases).</li>
+</ul>
+</li>
+</ul>
+<h1 id="tests-acceptance-criteria">Tests &amp; Acceptance Criteria<a class="headerlink" href="#tests-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Deterministic operation ids:</li>
+<li>[x] Re-submitting the same action with the same <code>CallContext.idempotency_key</code> returns the same <code>operation_id</code>.</li>
+<li>[x] Reusing an existing <code>replica_uuid</code> for a different <code>ReplicaKey</code> fails with <code>FAILED_PRECONDITION</code> (no overwrite).</li>
+<li>[x] <code>NO_LEASE</code> correctness:</li>
+<li>[x] <code>NO_LEASE</code> materialization creates no PID-bound use leases and no handle leases (even for loopback peers).</li>
+<li>[x] Cancellation isolation:</li>
+<li>[x] Two distinct <code>replica_uuid</code>s can map to the same <code>ReplicaKey</code>; canceling one does not affect the other.</li>
+<li>[x] Placement leases:</li>
+<li>[x] <code>lease_token</code> is required for renew/release; invalid/expired tokens fail safely.</li>
+<li>[x] PlanSpec determinism:</li>
+<li>[x] <code>Plan.to_spec()</code> is stable for identical inputs (serialization deterministic).</li>
+<li>[x] Node Agent plan execution:</li>
+<li>[x] Instance step success + failure/cancel coverage (<code>tests/python/node_agent/test_plan_execution.py</code>).</li>
+<li>[x] Instance registry:</li>
+<li>[x] Register/list/unregister instance lifecycle coverage (<code>tests/python/global_store/test_instances.py</code>).</li>
+</ul>
+<h1 id="rollout-backout">Rollout &amp; Backout<a class="headerlink" href="#rollout-backout" title="Permanent link">&para;</a></h1>
+<ul>
+<li>No legacy compatibility path is required; the SDK ships Operation-only prefetch.</li>
+<li>Backout strategy: revert the 0055 change set as a unit (no dual-path feature gates).</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

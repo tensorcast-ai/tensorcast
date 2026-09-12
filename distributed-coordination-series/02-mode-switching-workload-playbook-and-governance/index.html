@@ -1,0 +1,5388 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/">
+      
+      
+        <link rel="prev" href="../01-global-optimum-vs-distributed-execution-framework/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>02. 模式切换、工作负载画像与治理落地（决策手册） - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#02" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              02. 模式切换、工作负载画像与治理落地（决策手册）
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 本文目标
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-01" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 术语与关系（与 01 对齐）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 统一目标：不是单指标最优，而是系统稳态最优
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-artifact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 画像模型：把 Artifact 从“对象”变成“行为体”
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#31" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 七维画像向量
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#32" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 五类主画像（用于初始治理）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 协调模式：从“架构口号”变成“运行策略”
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#41" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 三模式定义
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#42" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 模式与项目现状映射
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#43" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 模式切换状态机
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 中心化与分布式的裁决逻辑（你关心的核心权衡）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#51" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 什么时候偏中心化
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#52" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 什么时候偏分布式
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#53" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 一句话规则
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#54-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 KV 两类场景的专门裁决
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 控制回路设计：避免振荡与误触发
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#61" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 三层回路
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#62" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 防振荡机制（必须有）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#63" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.3 统一裁决顺序
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#64-v0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.4 模式切换默认参数表（v0 建议值，可灰度调参）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#65-lane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.5 触发/退出与回滚判据矩阵（按 lane）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-00560060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. 四个高价值场景推演（面向 0056/0060 目标）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#71-0060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 场景一：短寿命高频生产-消费链（0060 主场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#72-artifact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 场景二：长寿命高复用 artifact（现状与未来都常见）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#73-kv-0056" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.3 场景三：KV 预热迁移（0056 提案场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#74-decoder-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.4 场景四：Decoder 间共享 KV（你补充的关键场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#75-issuer-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.5 issuer 路由故障语义矩阵（Queue/共享缓存必须具备）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. 决策卡片（用于架构评审会）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#81-a" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 卡片 A：新状态应放哪层？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#82-b-gs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 卡片 B：某操作是否必须每次回源 GS？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#83-c-global-governed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 卡片 C：是否需要升级模式到 Global-Governed？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#84-dproducer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 卡片 D：Producer 该不该等待，以及等在哪里？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#85-elane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 卡片 E：lane 决策记录点与重试语义
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. 从当前系统到目标系统的分阶段决策
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#91-0-00560060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 阶段 0：立即可执行（不依赖 0056/0060 新协议）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#92-1-0060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 阶段 1：围绕 0060 试点（队列场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#93-2-0056" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 阶段 2：围绕 0056 试点（控制网络）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#94-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.4 阶段 3：融合治理
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#95-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.5 阶段 4：架构级升级（可选激进路线）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. 指标体系与治理闸门
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#101" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.1 指标分组
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#102" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.2 上线闸门
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. 面向当前决策的建议结论
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. 问题覆盖矩阵（对应本轮讨论）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. 待验证假设（必须实证）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. 架构重构执行规划（高层）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="14. 架构重构执行规划（高层）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#141-wave-based" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.1 执行路线图（Wave-based）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#142-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.2 Wave 与现有模块映射
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#143-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.3 每个 Wave 的重构方向与改变范围
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="14.3 每个 Wave 的重构方向与改变范围">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#w1lane-aware-local-executor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W1：Lane-aware Local Executor（中改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w2shard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W2：Shard 协调层（中到高改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w3kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W3：共享KV轻目录（高改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W4：自动化治理（中改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#144" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.4 变更边界（避免失控）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-adr-lite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. 统一决策清单（ADR-lite）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="15. 统一决策清单（ADR-lite）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#151-adr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15.1 每条 ADR 的回滚护栏（统一模板）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#152" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15.2 拍板优先级建议（从高到低）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16. 先做“局部重构”是否更有利（结论：是）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="16. 先做“局部重构”是否更有利（结论：是）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#161-pre-refactor-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.1 局部重构优先清单（Pre-Refactor Set）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#162" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.2 为什么这些局部重构“先做更优”
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#163-90" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.3 建议的最小启动组合（90 天）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#164-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.4 与 Wave 路线的对应
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#165" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.5 为什么“先局部重构”更利于长期目标（因果链）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#166" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.6 对你的核心场景，局部重构的直接收益
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#167" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.7 哪些改造不建议先做（避免高成本返工）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#168" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.8 你当前可直接拍板的“先行重构组合”
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#17-scaling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17. Scaling 规模目标与架构决策映射
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17. Scaling 规模目标与架构决策映射">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#171" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1 先统一口径：规模不是节点数单指标
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#172" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.2 现状与目标的规模潜力差异（按架构阶段）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#173" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3 与现有模块的直接关系（你关心的落地性）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#174" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4 推荐的规模推进方式（避免一开始就追“大而全”）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#18-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18. 场景扩展与泛化：不止权重与 KV
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="18. 场景扩展与泛化：不止权重与 KV">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#181" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.1 扩展场景清单（基于现有模块能力）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#182" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.2 泛化裁决矩阵（映射到三轨）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#183" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.3 泛化是否成立：判定标准
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 本文目标
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-01" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1.1 术语与关系（与 01 对齐）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 统一目标：不是单指标最优，而是系统稳态最优
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-artifact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 画像模型：把 Artifact 从“对象”变成“行为体”
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#31" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.1 七维画像向量
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#32" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3.2 五类主画像（用于初始治理）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 协调模式：从“架构口号”变成“运行策略”
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#41" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.1 三模式定义
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#42" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.2 模式与项目现状映射
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#43" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4.3 模式切换状态机
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 中心化与分布式的裁决逻辑（你关心的核心权衡）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#51" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.1 什么时候偏中心化
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#52" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.2 什么时候偏分布式
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#53" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.3 一句话规则
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#54-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5.4 KV 两类场景的专门裁决
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 控制回路设计：避免振荡与误触发
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#61" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.1 三层回路
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#62" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.2 防振荡机制（必须有）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#63" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.3 统一裁决顺序
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#64-v0" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.4 模式切换默认参数表（v0 建议值，可灰度调参）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#65-lane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6.5 触发/退出与回滚判据矩阵（按 lane）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-00560060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. 四个高价值场景推演（面向 0056/0060 目标）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#71-0060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.1 场景一：短寿命高频生产-消费链（0060 主场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#72-artifact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.2 场景二：长寿命高复用 artifact（现状与未来都常见）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#73-kv-0056" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.3 场景三：KV 预热迁移（0056 提案场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#74-decoder-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.4 场景四：Decoder 间共享 KV（你补充的关键场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#75-issuer-queue" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7.5 issuer 路由故障语义矩阵（Queue/共享缓存必须具备）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. 决策卡片（用于架构评审会）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#81-a" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.1 卡片 A：新状态应放哪层？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#82-b-gs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.2 卡片 B：某操作是否必须每次回源 GS？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#83-c-global-governed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.3 卡片 C：是否需要升级模式到 Global-Governed？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#84-dproducer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.4 卡片 D：Producer 该不该等待，以及等在哪里？
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#85-elane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8.5 卡片 E：lane 决策记录点与重试语义
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. 从当前系统到目标系统的分阶段决策
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#91-0-00560060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.1 阶段 0：立即可执行（不依赖 0056/0060 新协议）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#92-1-0060" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.2 阶段 1：围绕 0060 试点（队列场景）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#93-2-0056" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.3 阶段 2：围绕 0056 试点（控制网络）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#94-3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.4 阶段 3：融合治理
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#95-4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9.5 阶段 4：架构级升级（可选激进路线）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. 指标体系与治理闸门
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#101" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.1 指标分组
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#102" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10.2 上线闸门
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. 面向当前决策的建议结论
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. 问题覆盖矩阵（对应本轮讨论）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. 待验证假设（必须实证）
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. 架构重构执行规划（高层）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="14. 架构重构执行规划（高层）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#141-wave-based" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.1 执行路线图（Wave-based）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#142-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.2 Wave 与现有模块映射
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#143-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.3 每个 Wave 的重构方向与改变范围
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="14.3 每个 Wave 的重构方向与改变范围">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#w1lane-aware-local-executor" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W1：Lane-aware Local Executor（中改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w2shard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W2：Shard 协调层（中到高改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w3kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W3：共享KV轻目录（高改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#w4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        W4：自动化治理（中改动）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#144" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14.4 变更边界（避免失控）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15-adr-lite" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. 统一决策清单（ADR-lite）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="15. 统一决策清单（ADR-lite）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#151-adr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15.1 每条 ADR 的回滚护栏（统一模板）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#152" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15.2 拍板优先级建议（从高到低）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#16" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16. 先做“局部重构”是否更有利（结论：是）
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="16. 先做“局部重构”是否更有利（结论：是）">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#161-pre-refactor-set" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.1 局部重构优先清单（Pre-Refactor Set）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#162" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.2 为什么这些局部重构“先做更优”
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#163-90" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.3 建议的最小启动组合（90 天）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#164-wave" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.4 与 Wave 路线的对应
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#165" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.5 为什么“先局部重构”更利于长期目标（因果链）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#166" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.6 对你的核心场景，局部重构的直接收益
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#167" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.7 哪些改造不建议先做（避免高成本返工）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#168" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        16.8 你当前可直接拍板的“先行重构组合”
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#17-scaling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17. Scaling 规模目标与架构决策映射
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="17. Scaling 规模目标与架构决策映射">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#171" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.1 先统一口径：规模不是节点数单指标
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#172" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.2 现状与目标的规模潜力差异（按架构阶段）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#173" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.3 与现有模块的直接关系（你关心的落地性）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#174" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        17.4 推荐的规模推进方式（避免一开始就追“大而全”）
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#18-kv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18. 场景扩展与泛化：不止权重与 KV
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="18. 场景扩展与泛化：不止权重与 KV">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#181" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.1 扩展场景清单（基于现有模块能力）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#182" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.2 泛化裁决矩阵（映射到三轨）
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#183" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        18.3 泛化是否成立：判定标准
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="02">02. 模式切换、工作负载画像与治理落地（决策手册）<a class="headerlink" href="#02" title="Permanent link">&para;</a></h1>
+<h2 id="1">1. 本文目标<a class="headerlink" href="#1" title="Permanent link">&para;</a></h2>
+<p><code>01</code> 解决“状态该放哪”，本篇解决“在真实业务波动中如何决策”。</p>
+<p>核心输入：</p>
+<ol>
+<li>当前可用能力：<code>0055</code> 已落地。</li>
+<li>目标场景：<code>0056</code>（daemon-run plan/signals/KV 协调）与 <code>0060</code>（descriptor-only queue）。</li>
+<li>现实约束：TensorCast 不是追求百万 QPS 的消息系统，而是高价值大对象/高干扰数据系统。</li>
+</ol>
+<p>核心输出：</p>
+<ol>
+<li>一套可执行的工作负载画像模型。</li>
+<li>一套“中心化 vs 分布式”裁决逻辑。</li>
+<li>一套从当前系统逐步演进到目标状态的决策路线。</li>
+</ol>
+<h2 id="11-01">1.1 术语与关系（与 <code>01</code> 对齐）<a class="headerlink" href="#11-01" title="Permanent link">&para;</a></h2>
+<p>为避免实现阶段术语漂移，本篇沿用 <code>01</code> 的强制口径：</p>
+<ol>
+<li><code>lane</code>：治理轨（收敛为三类）：<code>catalog-first</code> / <code>stream-first</code> / <code>hybrid-cache-first</code>。</li>
+<li><code>mode</code>：治理强度档位（运行期可切换）：<code>Local-First</code> / <code>Budgeted-Hybrid</code> / <code>Global-Governed</code>。</li>
+<li><code>policy</code>：可审计治理策略对象（Lane Compiler 产物），至少包含 <code>lane + policy_version + staleness_budget + mode_limits</code>。</li>
+</ol>
+<p>注意：本篇的 <code>policy/policy_version</code> 指 lane/mode/预算/陈旧性等“治理策略版本”，不要与现有 API/Proto 中的 <code>StorePolicy</code>（持久化/驻留/冷暖/保活等存储语义）混淆。两者正交：<code>StorePolicy</code> 决定“存到哪/保多久”，治理 <code>policy</code> 决定“怎么协调/怎么去热/怎么切 mode”。</p>
+<p>硬约束（本篇所有“切换/治理”讨论都必须满足）：</p>
+<ol>
+<li><code>mode ⟂ lane</code>：<code>mode</code> 只改变闸门强度，不改变正确性边界，也不把 per-item 推进推回 GS。</li>
+<li>同一 <code>idempotency_key</code> 内默认禁止切 <code>lane</code>；若必须切 lane，必须进入新幂等域并记录迁移审计。</li>
+</ol>
+<p>实现验收口径：LaneContext/Directory/去热化/幂等 的最小契约集合见 <code>01-global-optimum-vs-distributed-execution-framework.md</code> 的第 16 节（Contract-First）。</p>
+<hr />
+<h2 id="2">2. 统一目标：不是单指标最优，而是系统稳态最优<a class="headerlink" href="#2" title="Permanent link">&para;</a></h2>
+<p>我们优化的是多目标函数，不是单点吞吐：</p>
+<ol>
+<li>正确性边界：ownership / fencing / idempotency。</li>
+<li>性能：吞吐与 tail latency。</li>
+<li>干扰：大流对关键流的影响。</li>
+<li>控制面可扩展性：GS 回源率与热写压力。</li>
+<li>演进可控性：可灰度、可回滚、可解释。</li>
+</ol>
+<p>结论：</p>
+<ul>
+<li>“每次决策全局最优”在工程上不可持续；</li>
+<li>“边界强一致 + 执行近似最优”才是可长期运行的方案。</li>
+</ul>
+<hr />
+<h2 id="3-artifact">3. 画像模型：把 Artifact 从“对象”变成“行为体”<a class="headerlink" href="#3-artifact" title="Permanent link">&para;</a></h2>
+<h2 id="31">3.1 七维画像向量<a class="headerlink" href="#31" title="Permanent link">&para;</a></h2>
+<p>每个 Artifact/Workload 用以下七维描述：</p>
+<ol>
+<li>生命周期：<code>L</code>（短/中/长）。</li>
+<li>生产速率：<code>lambda_p</code>（items/s 或 bytes/s）。</li>
+<li>消费速率：<code>lambda_c</code>。</li>
+<li>增长速率：<code>gN=lambda_p-lambda_c</code>，<code>gB=lambda_p*E[size]-lambda_c*E[size]</code>。</li>
+<li>对象规模：<code>E[size]</code> 与 p95 size。</li>
+<li>复用率：<code>R</code>（跨请求复用概率）。</li>
+<li>拓扑干扰系数：<code>I</code>（大流对关键流/链路的影响强度）。</li>
+</ol>
+<p>这七维是决策输入，不是仅用于监控展示。</p>
+<h2 id="32">3.2 五类主画像（用于初始治理）<a class="headerlink" href="#32" title="Permanent link">&para;</a></h2>
+<ol>
+<li><code>A类</code> 长寿命高复用：模型权重、基线工件。</li>
+<li><code>B类</code> 短寿命高频稳态：在线流水线中间结果。</li>
+<li><code>C类</code> 短寿命持续增长：生产快于消费，积压扩大。</li>
+<li><code>D类</code> 高干扰大对象：单次传输影响拓扑显著。</li>
+<li><code>E类</code> 中寿命共享热点：典型如 Decoder 间共享 KV 片段。</li>
+</ol>
+<p>建议：先做五类即可，不要过早把标签做得过细。</p>
+<hr />
+<h2 id="4">4. 协调模式：从“架构口号”变成“运行策略”<a class="headerlink" href="#4" title="Permanent link">&para;</a></h2>
+<h2 id="41">4.1 三模式定义<a class="headerlink" href="#41" title="Permanent link">&para;</a></h2>
+<ol>
+<li><code>Local-First</code>（默认模式）。</li>
+<li>主要依赖 SDK/Daemon 本地状态。</li>
+<li>
+<p>GS 仅用于必要的低频真相刷新。</p>
+</li>
+<li>
+<p><code>Budgeted-Hybrid</code>（收敛模式）。</p>
+</li>
+<li>本地执行仍占主导。</li>
+<li>
+<p>但执行必须满足全局预算边界（链路/并发/保活预算）。</p>
+</li>
+<li>
+<p><code>Global-Governed</code>（高风险治理模式）。</p>
+</li>
+<li>对高干扰或高价值关键流采用更强中心约束。</li>
+<li>许可优先于执行，牺牲部分延迟换系统稳定。</li>
+</ol>
+<p>补充约束（必须写死，防止实现漂移）：</p>
+<ul>
+<li><code>Global-Governed</code> 不是“每请求回源 GS / 让 GS 执行热路径”，而是更强的 admission/budget/回源闸门；per-item 推进仍必须留在 daemon/broker 本地。</li>
+</ul>
+<h2 id="42">4.2 模式与项目现状映射<a class="headerlink" href="#42" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>当前支持度</th>
+<th>依赖能力</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Local-First</td>
+<td>中（部分可实践）</td>
+<td>0055 + 当前 daemon/GS registry + 选源去热化</td>
+</tr>
+<tr>
+<td>Budgeted-Hybrid</td>
+<td>中（可先做部分）</td>
+<td>memory tier + 目录缓存 + 预算控制面</td>
+</tr>
+<tr>
+<td>Global-Governed</td>
+<td>中低（需谨慎推进）</td>
+<td>强仲裁策略、灰度开关、回滚机制</td>
+</tr>
+</tbody>
+</table>
+<p><code>0056/0060</code> 的价值主要在于把 Local-First 与 Hybrid 的执行基础补齐，而不是让系统走向“全中心化”。</p>
+<p>现状校正（必须明确）：</p>
+<ol>
+<li>当前 P2P 选源在主路径上仍显著依赖 GS（<code>materialize_orchestrator -&gt; GlobalStoreClient::request_replica_transport/request_view_transport</code>）。</li>
+<li>因此 <code>Wave 0/1</code> 的前置目标不是“直接享受 Local-First 收益”，而是先完成“GS 选源去热化”。</li>
+</ol>
+<h2 id="43">4.3 模式切换状态机<a class="headerlink" href="#43" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; LocalFirst
+  LocalFirst --&gt; Hybrid: gB持续为正 + backlog age抬升
+  Hybrid --&gt; Governed: I高 + 关键流SLA受损
+  Governed --&gt; Hybrid: 干扰下降且稳定窗口达标
+  Hybrid --&gt; LocalFirst: 增长收敛 + 预算压力解除
+
+  note right of Governed
+    正确性边界始终最高优先级
+  end note</code></pre>
+<hr />
+<h2 id="5">5. 中心化与分布式的裁决逻辑（你关心的核心权衡）<a class="headerlink" href="#5" title="Permanent link">&para;</a></h2>
+<h2 id="51">5.1 什么时候偏中心化<a class="headerlink" href="#51" title="Permanent link">&para;</a></h2>
+<p>满足任意一条即可倾向中心治理：</p>
+<ol>
+<li>冲突域大且跨节点（ownership 争用明显）。</li>
+<li>错判成本高（一次错误会放大为系统风险）。</li>
+<li>流量干扰度高（I 高，大流冲击关键流）。</li>
+<li>任务价值高（关键 SLA 流量）。</li>
+</ol>
+<h2 id="52">5.2 什么时候偏分布式<a class="headerlink" href="#52" title="Permanent link">&para;</a></h2>
+<p>满足以下条件时优先本地化：</p>
+<ol>
+<li>高频状态推进（per-item/per-attempt）。</li>
+<li>决策依赖局部瞬时信息（本机队列、本机资源水位）。</li>
+<li>全局最优收益低于协调开销。</li>
+<li>失败可通过重试/降级恢复。</li>
+</ol>
+<h2 id="53">5.3 一句话规则<a class="headerlink" href="#53" title="Permanent link">&para;</a></h2>
+<ul>
+<li>中心化负责“边界真相”；</li>
+<li>分布式负责“高频执行”。</li>
+</ul>
+<h2 id="54-kv">5.4 KV 两类场景的专门裁决<a class="headerlink" href="#54-kv" title="Permanent link">&para;</a></h2>
+<p>你补充的场景要求我们把 KV 至少拆成两类：</p>
+<ol>
+<li><code>PD流式KV</code></li>
+<li>更像实时数据流：高频、短停留、连续传输。</li>
+<li>
+<p>默认裁决：<code>Local-First</code> 或 <code>Budgeted-Hybrid</code>，GS 只做 fencing/shard lease。</p>
+</li>
+<li>
+<p><code>Decoder共享KV</code></p>
+</li>
+<li>更像“热点共享副本”：复用中高，生命周期中等。</li>
+<li>默认裁决：<code>Budgeted-Hybrid</code>，需要轻量目录与热点迁移能力；在高价值场景可临时升到 <code>Global-Governed</code>。</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>PD流式KV</th>
+<th>Decoder共享KV</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>核心目标</td>
+<td>推进吞吐与低时延</td>
+<td>命中率与热点均衡</td>
+</tr>
+<tr>
+<td>目录依赖</td>
+<td>低</td>
+<td>中到高</td>
+</tr>
+<tr>
+<td>最佳路径</td>
+<td>stream-first</td>
+<td>hybrid-cache-first</td>
+</tr>
+<tr>
+<td>主要风险</td>
+<td>控制面回源过多导致抖动</td>
+<td>热点集中与迁移滞后</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6">6. 控制回路设计：避免振荡与误触发<a class="headerlink" href="#6" title="Permanent link">&para;</a></h2>
+<h2 id="61">6.1 三层回路<a class="headerlink" href="#61" title="Permanent link">&para;</a></h2>
+<ol>
+<li>快回路（ms 级）。</li>
+<li>
+<p>本地重试、局部重选、短退避。</p>
+</li>
+<li>
+<p>收敛回路（100ms~秒级）。</p>
+</li>
+<li>
+<p>admission/credit/局部并发调节。</p>
+</li>
+<li>
+<p>全局回路（秒级）。</p>
+</li>
+<li>全局预算更新、模式升级/回切决策。</li>
+</ol>
+<h2 id="62">6.2 防振荡机制（必须有）<a class="headerlink" href="#62" title="Permanent link">&para;</a></h2>
+<ol>
+<li>双阈值（进入阈值 &gt; 退出阈值）。</li>
+<li>最小驻留时间（min dwell）。</li>
+<li>冷却窗口（cooldown）。</li>
+<li>调整速率限制（rate limit）。</li>
+</ol>
+<h2 id="63">6.3 统一裁决顺序<a class="headerlink" href="#63" title="Permanent link">&para;</a></h2>
+<p>当回路冲突时，固定顺序：</p>
+<ol>
+<li>fencing/ownership 正确性。</li>
+<li>关键流 SLA。</li>
+<li>全局预算边界。</li>
+<li>吞吐与命中率最优。</li>
+</ol>
+<p>这条顺序必须写入实现注释与值班手册，不能只在设计文档里出现。</p>
+<h2 id="64-v0">6.4 模式切换默认参数表（v0 建议值，可灰度调参）<a class="headerlink" href="#64-v0" title="Permanent link">&para;</a></h2>
+<blockquote>
+<p>目标是先给出“可执行默认值”，避免上线后完全靠人工值守调参。</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>参数</th>
+<th>默认值（建议）</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>快回路窗口</td>
+<td><code>10s</code></td>
+<td>统计短期抖动与局部失败率</td>
+</tr>
+<tr>
+<td>收敛回路窗口</td>
+<td><code>60s</code></td>
+<td>判断 backlog/回源率是否持续偏离</td>
+</tr>
+<tr>
+<td>全局回路窗口</td>
+<td><code>300s</code></td>
+<td>判断模式升级/回切的稳态趋势</td>
+</tr>
+<tr>
+<td>进入 <code>Budgeted-Hybrid</code> 条件</td>
+<td>连续 <code>2</code> 个收敛窗口超阈</td>
+<td>例：<code>GS回源率</code> 或 <code>backlog age</code> 超阈</td>
+</tr>
+<tr>
+<td>退出 <code>Budgeted-Hybrid</code> 条件</td>
+<td>连续 <code>3</code> 个收敛窗口回落</td>
+<td>进入阈值高于退出阈值（双阈值）</td>
+</tr>
+<tr>
+<td>进入 <code>Global-Governed</code> 条件</td>
+<td>连续 <code>2</code> 个全局窗口关键流 SLA 受损</td>
+<td>或 fencing 冲突率异常上升</td>
+</tr>
+<tr>
+<td>最小驻留时间（Governed）</td>
+<td><code>15 min</code></td>
+<td>避免模式抖动</td>
+</tr>
+<tr>
+<td>cooldown</td>
+<td><code>10 min</code></td>
+<td>回切后冷却时间，禁止立刻再升级</td>
+</tr>
+<tr>
+<td>调整速率限制</td>
+<td>每 <code>15 min</code> 最多一次模式变更</td>
+<td>控制系统振荡</td>
+</tr>
+</tbody>
+</table>
+<h2 id="65-lane">6.5 触发/退出与回滚判据矩阵（按 lane）<a class="headerlink" href="#65-lane" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>lane</th>
+<th>默认模式</th>
+<th>触发升级信号</th>
+<th>退出信号</th>
+<th>异常策略</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>catalog-first</code></td>
+<td><code>Budgeted-Hybrid</code></td>
+<td>GS 仲裁 P99 超预算且关键流受损</td>
+<td>目录命中与仲裁延迟恢复到阈值内</td>
+<td>默认 <code>fail-closed</code>（边界语义优先）</td>
+</tr>
+<tr>
+<td><code>stream-first</code></td>
+<td><code>Local-First</code></td>
+<td>backlog 持续上升 + 回源率异常</td>
+<td>backlog 收敛且回源率恢复</td>
+<td>控制动作 <code>fail-closed</code>；已接收数据短窗 <code>fail-open</code></td>
+</tr>
+<tr>
+<td><code>hybrid-cache-first</code></td>
+<td><code>Budgeted-Hybrid</code></td>
+<td>热点集中度持续恶化 + 迁移收益下降</td>
+<td>热点分散恢复且命中率回升</td>
+<td>目录建议可降级，ownership/fencing 仍 <code>fail-closed</code></td>
+</tr>
+</tbody>
+</table>
+<p>冲突处理细则：</p>
+<ol>
+<li>多信号同时触发时，先看 <code>6.3</code> 优先级，再看“持续时间最长”的信号源。</li>
+<li>同优先级冲突时，选择更保守模式（宁可短期损失吞吐，不放宽正确性边界）。</li>
+<li>任一窗口内出现 fencing/ownership 不确定态，立即切到保守执行并触发回滚检查。</li>
+</ol>
+<hr />
+<h2 id="7-00560060">7. 四个高价值场景推演（面向 0056/0060 目标）<a class="headerlink" href="#7-00560060" title="Permanent link">&para;</a></h2>
+<h2 id="71-0060">7.1 场景一：短寿命高频生产-消费链（0060 主场景）<a class="headerlink" href="#71-0060" title="Permanent link">&para;</a></h2>
+<p>特征：</p>
+<ol>
+<li><code>L</code> 短，<code>lambda_p/lambda_c</code> 都高。</li>
+<li>per-item 状态推进频繁。</li>
+<li>数据可大可小，但 descriptor 推进频率极高。</li>
+</ol>
+<p>裁决：</p>
+<ol>
+<li>work item/work lease/credit 放 broker leader 本地。</li>
+<li>GS 仅承接 queue leadership + epoch fencing。</li>
+<li>issuer-daemon retention handle 走 issuer 路由，不绕 leader。</li>
+</ol>
+<p>前置条件（先于 queue 本地状态机实现）：</p>
+<ol>
+<li>需要先定义 <code>QueueDirectory</code> 最小契约，至少回答三件事：</li>
+<li>如何稳定定位 queue（<code>namespace/name/group</code> 语义）。</li>
+<li>如何发现 leader endpoint（含 bounded-stale 预算）。</li>
+<li>如何绑定 epoch fencing（与 <code>operation lease_generation</code> 对齐）。</li>
+<li>在当前仓库可先复用 <code>operation lease + capability_token.queue_epoch + worker/instance directory</code> 组合实现最小版本。</li>
+</ol>
+<p>收益：</p>
+<ul>
+<li>避免 GS 成为热写热点。</li>
+</ul>
+<p>风险：</p>
+<ul>
+<li>L0 broker 故障下状态丢失（0060 已明确语义边界）。</li>
+</ul>
+<h2 id="72-artifact">7.2 场景二：长寿命高复用 artifact（现状与未来都常见）<a class="headerlink" href="#72-artifact" title="Permanent link">&para;</a></h2>
+<p>特征：</p>
+<ol>
+<li><code>L</code> 长，<code>R</code> 高。</li>
+<li>重复读取多，路由质量重要。</li>
+</ol>
+<p>裁决：</p>
+<ol>
+<li>replica 目录与低频状态放 GS。</li>
+<li>单次读路径中的重试/候选排序在 daemon 本地做。</li>
+<li>SDK 保留短 TTL 本地缓存，降低重复回源。</li>
+</ol>
+<p>收益：</p>
+<ul>
+<li>兼顾全局视图与热路径成本。</li>
+</ul>
+<h2 id="73-kv-0056">7.3 场景三：KV 预热迁移（0056 提案场景）<a class="headerlink" href="#73-kv-0056" title="Permanent link">&para;</a></h2>
+<p>特征：</p>
+<ol>
+<li>对象高基数，生命周期偏短。</li>
+<li>批量 exists/get/put 高频。</li>
+<li>若全量进 GS catalog，控制面会被拖垮。</li>
+</ol>
+<p>裁决：</p>
+<ol>
+<li>GS 只管 shard lease（低基数仲裁）。</li>
+<li>home daemon 管理 blob 不变量与 epoch fence。</li>
+<li>daemon-run plan 负责分布式动作编排。</li>
+</ol>
+<p>收益：</p>
+<ul>
+<li>保留“全局可控边界”同时避免高基数目录中心化。</li>
+</ul>
+<h2 id="74-decoder-kv">7.4 场景四：Decoder 间共享 KV（你补充的关键场景）<a class="headerlink" href="#74-decoder-kv" title="Permanent link">&para;</a></h2>
+<p>特征：</p>
+<ol>
+<li>不同 Decoder 实例之间存在可复用 KV 片段。</li>
+<li>对象生命周期明显长于 PD 流式中间态。</li>
+<li>复用收益与热点迁移收益显著。</li>
+</ol>
+<p>裁决：</p>
+<ol>
+<li>不走“纯流式本地态”单一路径，采用 <code>hybrid-cache-first</code>。</li>
+<li>目录层不必记录全部细粒度对象，但必须记录热点摘要与副本质量。</li>
+<li>数据面依旧由 daemon 执行，目录层负责建议迁移与反热点。</li>
+</ol>
+<p>收益：</p>
+<ul>
+<li>把共享KV治理从“碰运气命中”提升为“可规划命中”。</li>
+</ul>
+<p>风险：</p>
+<ul>
+<li>目录过细会热化；目录过粗会失去迁移收益，需要持续调参。</li>
+</ul>
+<h2 id="75-issuer-queue">7.5 issuer 路由故障语义矩阵（Queue/共享缓存必须具备）<a class="headerlink" href="#75-issuer-queue" title="Permanent link">&para;</a></h2>
+<p><code>retention handle</code> 在当前实现上与 issuer 强绑定（token 校验会校验 <code>issuer_daemon_id</code>）。<br />
+因此必须把故障语义写成显式矩阵，而不是“失败后重试”一句话带过。</p>
+<table>
+<thead>
+<tr>
+<th>故障场景</th>
+<th>默认语义</th>
+<th>允许动作</th>
+<th>禁止动作</th>
+<th>补救流程</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>issuer daemon down</td>
+<td><code>fail-closed</code>（默认）</td>
+<td>在 <code>grace TTL</code> 内保留已在途消费</td>
+<td>无限续租、无界等待</td>
+<td>进入 <code>renew_pending</code>，超时后 <code>re-stage</code> 到新 issuer；旧 handle 写入 broker tombstone</td>
+</tr>
+<tr>
+<td>broker 与 issuer 网络分区</td>
+<td><code>fail-closed</code>（默认）</td>
+<td>短窗重试与目录重解析</td>
+<td>用旧路由长期续租</td>
+<td>超过分区阈值后拒绝 renew/release，触发 producer 侧补偿或重入队</td>
+</tr>
+<tr>
+<td>queue epoch 变更（leader 切换）</td>
+<td>强围栏切断旧会话</td>
+<td>新 epoch 下重建 lease/credit</td>
+<td>旧 epoch 的 ack/nack/extend</td>
+<td>旧 epoch 直接拒绝，按 <code>(queue_operation_id, epoch)</code> 重新握手</td>
+</tr>
+<tr>
+<td>issuer 重启且目录已迁移</td>
+<td>有条件恢复</td>
+<td>若可验证同 issuer 身份则继续</td>
+<td>跨 issuer 直接复用旧 token</td>
+<td>无法验证时走 <code>re-stage + new handle</code>，旧 token tombstone 回收</td>
+</tr>
+</tbody>
+</table>
+<p>语义原则：</p>
+<ol>
+<li><code>fail-open</code> 仅限短暂“读已接收数据”窗口，不允许放宽 ownership/epoch 校验。</li>
+<li>任何涉及 renew/release 的不确定状态，统一 <code>fail-closed</code>。</li>
+<li>目录恢复与重试都必须受限于预算（重试次数/时间窗），避免故障风暴放大。</li>
+</ol>
+<hr />
+<h2 id="8">8. 决策卡片（用于架构评审会）<a class="headerlink" href="#8" title="Permanent link">&para;</a></h2>
+<p>以下卡片可直接用于评审结论模板。</p>
+<h2 id="81-a">8.1 卡片 A：新状态应放哪层？<a class="headerlink" href="#81-a" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TD
+  Q1[状态更新频率高吗?] --&gt;|是| Q2[是否必须跨节点强一致?]
+  Q1 --&gt;|否| Q3[是否属于全局边界真相?]
+
+  Q2 --&gt;|否| D1[放Daemon本地]
+  Q2 --&gt;|是| D2[拆分: 边界放GS, 推进放Daemon]
+
+  Q3 --&gt;|是| D3[放GS]
+  Q3 --&gt;|否| D4[放SDK/Daemon缓存]</code></pre>
+<h2 id="82-b-gs">8.2 卡片 B：某操作是否必须每次回源 GS？<a class="headerlink" href="#82-b-gs" title="Permanent link">&para;</a></h2>
+<p>判定标准：</p>
+<ol>
+<li>不涉及 ownership/epoch/fencing：默认不必每次回源。</li>
+<li>涉及边界仲裁：必须回源或使用有效围栏缓存。</li>
+<li>只为“追求可能更优路由”而回源：优先用 bounded-stale 本地信号。</li>
+</ol>
+<h2 id="83-c-global-governed">8.3 卡片 C：是否需要升级模式到 Global-Governed？<a class="headerlink" href="#83-c-global-governed" title="Permanent link">&para;</a></h2>
+<p>触发建议：</p>
+<ol>
+<li><code>I</code> 高且持续。</li>
+<li>关键流 SLA 持续受损。</li>
+<li>Local/Hybrid 下无法在两个窗口内收敛。</li>
+</ol>
+<p>退出建议：</p>
+<ol>
+<li>干扰指标与 SLA 同时恢复。</li>
+<li>达到最小驻留时长后再回切。</li>
+</ol>
+<h2 id="84-dproducer">8.4 卡片 D：Producer 该不该等待，以及等在哪里？<a class="headerlink" href="#84-dproducer" title="Permanent link">&para;</a></h2>
+<p>判定顺序：</p>
+<ol>
+<li>Consumer 可立即接收：优先直达（direct-to-consumer）。</li>
+<li>不可立即接收且等待窗口很短：允许极短暂 <code>VRAM</code> 缓冲。</li>
+<li>等待窗口达到秒级或更长：转入 <code>DRAM/stable_dram</code>（默认）。</li>
+<li>积压持续增长：落入共享磁盘/对象层兜底，并进入 <code>Budgeted-Hybrid</code> 或 <code>Global-Governed</code>。</li>
+</ol>
+<h2 id="85-elane">8.5 卡片 E：lane 决策记录点与重试语义<a class="headerlink" href="#85-elane" title="Permanent link">&para;</a></h2>
+<p>判定标准：</p>
+<ol>
+<li>lane 决策必须可审计，至少记录：<code>request_id + idempotency_key + lane + policy_version</code>。</li>
+<li>同一 <code>idempotency_key</code> 默认不允许在重试中切换 lane（避免语义漂移与重复副作用）。</li>
+<li>若确需切 lane，必须显式进入新幂等域（新 <code>idempotency_key</code>）并留下迁移审计记录。</li>
+<li>审计与指标的基数必须受控：<code>lane/policy_version/qos</code> 可进入指标标签；<code>request_id/idempotency_key</code> 必须只进日志/trace（禁止进入 Prometheus label）。</li>
+</ol>
+<p>近期落地建议（结合当前协议）：</p>
+<ol>
+<li>Plan 路径短期先借 <code>PlanSpec.context.tags</code> 透传 lane/policy_version。</li>
+<li>非 Plan 路径（<code>materialize/prefetch/pin/...</code>）短期由 SDK 把 <code>CallContext.tags</code> 映射到 daemon gRPC metadata（因为当前 <code>store_daemon.proto</code> 尚无统一 <code>CallContext</code> 字段），透传 lane/policy_version。</li>
+<li>推荐 metadata keys（v0 约定）：<code>x-tc-lane</code>, <code>x-tc-policy-version</code>, <code>x-tc-request-id</code>, <code>x-tc-idempotency-key</code>, <code>x-tc-qos</code>（缺省值允许为空但必须可审计）。</li>
+<li>daemon 侧统一在执行入口落审计日志与关键指标标签（至少 lane/policy_version/qos），避免“只有 Plan 可审计”的断层。</li>
+<li>协议演进阶段把 LaneContext 升格为显式字段，并覆盖 plan 与非 plan RPC，减少隐式约定与跨语言偏差。</li>
+</ol>
+<hr />
+<h2 id="9">9. 从当前系统到目标系统的分阶段决策<a class="headerlink" href="#9" title="Permanent link">&para;</a></h2>
+<h2 id="91-0-00560060">9.1 阶段 0：立即可执行（不依赖 0056/0060 新协议）<a class="headerlink" href="#91-0-00560060" title="Permanent link">&para;</a></h2>
+<ol>
+<li>固化状态分层原则：热状态不上 GS（per-item 推进不入 GS；强一致仅覆盖 fencing/ownership）。</li>
+<li>把“GS 参与每请求选源”识别为明确技术债，建立去热化改造清单与验收指标。</li>
+<li>以 <code>transport 路径降回源</code> 作为硬目标，至少落四项（注意：去热化必须保持 claim/reservation 等价语义）：</li>
+<li>source sticky（短窗粘性候选，减少重复中心仲裁）。</li>
+<li>短 TTL 候选缓存（携带 staleness 预算；命中即本地决策，失败才回源）。</li>
+<li>失败回源策略（本地失败后再回 GS，避免盲目双写路径）。</li>
+<li>claim/reservation 等价机制（例如 source 侧短 TTL ticket 或本地 reservation），并有超时回收防泄漏。</li>
+<li>建立 LaneContext 审计闭环：Plan 用 <code>PlanSpec.context.tags</code>；非 Plan 用 daemon metadata；daemon 统一落日志/指标标签，避免语义漂移。</li>
+<li>建立“回源率 + claim失败率 + fencing 失败率 + stale 超窗率 + 控制面 P99”指标闸门（lane/mode 维度可切片）。</li>
+<li>在现有流程中引入 mode 切换的观测与手动开关（kill switch/回滚优先），不急于自动化切换。</li>
+<li>配置与发布口径必须遵循 <code>docs/designs/0004-unified-runtime-config.md</code>，避免新增 ad-hoc env vars 或分散开关。</li>
+</ol>
+<h2 id="92-1-0060">9.2 阶段 1：围绕 0060 试点（队列场景）<a class="headerlink" href="#92-1-0060" title="Permanent link">&para;</a></h2>
+<ol>
+<li>先做单场景小流量 L0 试点。</li>
+<li>先落 <code>QueueDirectory</code> 最小契约，再验证 leader 本地推进 + epoch fencing 模式。</li>
+<li>验证 retention handle 的 issuer 路由与失效语义（含 grace TTL/re-stage/tombstone）。</li>
+</ol>
+<h2 id="93-2-0056">9.3 阶段 2：围绕 0056 试点（控制网络）<a class="headerlink" href="#93-2-0056" title="Permanent link">&para;</a></h2>
+<ol>
+<li>当前 <code>Plan.run</code> 以 SDK 本地编排为主；阶段 2 目标是把可外部执行步骤统一到 <code>NodeAgent.ExecutePlan</code>，避免新增平行执行面。</li>
+<li>建立 daemon cache signals 原型，并补齐 worker action 与目录缓存能力。</li>
+<li>如需 gateway，仅保留无状态接入能力；验证其可替换且不承载独占语义。</li>
+<li>明确 <code>NodeAgentDirectory</code> 最小契约（见 <code>01</code> 第 16.2 节），至少可稳定解析：<code>instance_id -&gt; node_agent_endpoint</code>（且 gated by <code>INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED</code>）。</li>
+<li>现状校正：当前仓库的 GS instance registry 具备 <code>capability_flags/signals_endpoint/labels</code>，但尚未形成“可直接拨号”的 <code>node_agent_endpoint</code> 事实锚点；因此在进入执行统一前，必须先把“Node Agent 可发现/可拨号”变成明确可验收的目录事实。</li>
+<li>补齐 SDK discovery/client（直连模式先行）：</li>
+<li>discovery：通过 bounded-stale directory 获取 instance 元信息，并解析 <code>node_agent_endpoint</code>（pilot 可短期用 reserved label 键承载，例如 <code>labels["tc.node_agent.endpoint"]</code>；长期必须升格为显式字段，避免 ad-hoc 约定）。</li>
+<li>client：SDK 侧提供 <code>NodeAgentService.ExecutePlan</code> 调用与错误映射；失败必须可解释（endpoint 缺失/能力不满足/拨号失败/target mismatch）。</li>
+<li>orchestration：<code>Plan.run</code> 的本地编排必须能把 instance steps 分发给 Node Agent（跨 target 依赖仍由编排层控制），避免“instance step 永远 UNIMPLEMENTED”的断层。</li>
+<li>统一验收口径（必须写清楚）：</li>
+<li>对外语义：只要启用 Node Agent 且目录可发现，Plan 中的 instance steps 就必须可执行；否则必须 fail-fast 并给出可操作的缺失项（目录事实、能力位、网络可达性）。</li>
+<li>一致性：LaneContext/审计键/幂等域规则与非 Plan 路径一致（避免 Plan 独享语义）。</li>
+</ol>
+<h2 id="94-3">9.4 阶段 3：融合治理<a class="headerlink" href="#94-3" title="Permanent link">&para;</a></h2>
+<ol>
+<li>画像驱动模式切换自动化。</li>
+<li>拓扑预算与关键流保护联动。</li>
+<li>以治理闭环而非功能数量作为里程碑。</li>
+</ol>
+<h2 id="95-4">9.5 阶段 4：架构级升级（可选激进路线）<a class="headerlink" href="#95-4" title="Permanent link">&para;</a></h2>
+<p>如果你选择更根本性的长期路线，建议进入阶段4：</p>
+<ol>
+<li>引入“三层协调器”：</li>
+<li>
+<p>Global（GS）/Shard（区域或分片）/Local（daemon）分层治理。</p>
+</li>
+<li>
+<p>引入 <code>Artifact Lane Compiler</code>：</p>
+</li>
+<li>
+<p>把每类 Artifact 编译为 <code>catalog-first / stream-first / hybrid-cache-first</code>，并可热更新策略。</p>
+</li>
+<li>
+<p>引入“共享KV轻目录层”：</p>
+</li>
+<li>不记录全部细粒度对象，只记录热点摘要与副本质量，支持迁移决策。</li>
+</ol>
+<hr />
+<h2 id="10">10. 指标体系与治理闸门<a class="headerlink" href="#10" title="Permanent link">&para;</a></h2>
+<h2 id="101">10.1 指标分组<a class="headerlink" href="#101" title="Permanent link">&para;</a></h2>
+<ol>
+<li>正确性：fencing 冲突、token 失配、双主写入。</li>
+<li>性能：p50/p95/p99、关键流 SLA。</li>
+<li>干扰：大流占比、非关键流延迟放大。</li>
+<li>控制面：GS 回源率、GS 热写 QPS、缓存 staleness 超窗率。</li>
+</ol>
+<h2 id="102">10.2 上线闸门<a class="headerlink" href="#102" title="Permanent link">&para;</a></h2>
+<ol>
+<li>设计闸门：状态 SoT 与一致性边界是否清晰。</li>
+<li>实验闸门：对照实验是否优于集中式与纯分布式 baseline。</li>
+<li>灰度闸门：是否有 mode kill switch 和一键回退。</li>
+<li>全量闸门：关键场景长稳运行是否通过。</li>
+<li>幂等闸门：所有在未知结果下可能被重试的动作必须具备 join key（幂等合流）或显式禁止重试（placement pin 等副作用动作尤需严格）。</li>
+</ol>
+<hr />
+<h2 id="11">11. 面向当前决策的建议结论<a class="headerlink" href="#11" title="Permanent link">&para;</a></h2>
+<p>结合现状与目标，建议当前采用以下主策略：</p>
+<ol>
+<li>把 <code>0056/0060</code> 当作方向约束，而非实现承诺。</li>
+<li>对所有新状态强制执行“边界状态 vs 推进状态”拆分评审。</li>
+<li>近期优先做可观测与治理闭环，而不是立即追求复杂控制算法。</li>
+<li>在队列与 plan 两条线都坚持“GS 低频仲裁、Daemon 高频执行”。</li>
+<li>保持强一致范围最小化：只覆盖 fencing/ownership。</li>
+<li>对 KV 明确区分 <code>PD流式</code> 与 <code>Decoder共享</code>，分别采用 <code>stream-first</code> 与 <code>hybrid-cache-first</code>。</li>
+<li>0056 执行面优先复用 <code>NodeAgent.ExecutePlan</code>，避免先引入双执行面复杂度。</li>
+<li>0060 在队列状态机前必须先落 <code>QueueDirectory</code> 最小契约与 issuer 故障语义。</li>
+</ol>
+<hr />
+<h2 id="12">12. 问题覆盖矩阵（对应本轮讨论）<a class="headerlink" href="#12" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>你的问题</th>
+<th>本文回答位置</th>
+<th>结论</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Artifact 可否按长/短生命周期区分</td>
+<td>3、7</td>
+<td>可以，但必须叠加频率/增长/干扰维度</td>
+</tr>
+<tr>
+<td>Decoder 间共享 KV 是否应与 PD-KV 区分治理</td>
+<td>5.4、7.4、11</td>
+<td>必须区分，前者更接近热点共享副本治理</td>
+</tr>
+<tr>
+<td>不同架构决策对 scaling 的影响</td>
+<td>17</td>
+<td>关键在于是否把高频控制状态从 GS 热路径迁出</td>
+</tr>
+<tr>
+<td>方案能否泛化到更多场景</td>
+<td>18</td>
+<td>能，前提是满足七维画像、三轨映射与边界围栏约束</td>
+</tr>
+<tr>
+<td>仅看 descriptor 为何仍可能瓶颈</td>
+<td>2、5、7.1</td>
+<td>控制面热路径若中心化，仍会拖垮系统</td>
+</tr>
+<tr>
+<td>全局最优与去中心化如何权衡</td>
+<td>5</td>
+<td>用边界强一致 + 执行近似最优</td>
+</tr>
+<tr>
+<td>去中心化性能要求不极端能否利用</td>
+<td>4、9</td>
+<td>可以适度增强中心预算治理，但不把 GS 放入热路径</td>
+</tr>
+<tr>
+<td>如何辅助后续决策</td>
+<td>8、9、10</td>
+<td>给出决策卡片、阶段路线与闸门体系</td>
+</tr>
+<tr>
+<td>0056/0060 是提案如何处理</td>
+<td>1、4.2、9</td>
+<td>作为目标约束分阶段验证，不按既成事实推进</td>
+</tr>
+<tr>
+<td>现状是否已高支持 Local-First</td>
+<td>4.2、9.1、17</td>
+<td>否：当前仍有 GS 选源热路径，Wave0/1 需先去热化</td>
+</tr>
+<tr>
+<td>0056 执行面是否应新建 gateway</td>
+<td>9.3、14、16</td>
+<td>不应先新建平行执行面；先复用 Node Agent ExecutePlan</td>
+</tr>
+<tr>
+<td>Queue epoch 是否可先于目录契约落地</td>
+<td>7.1、9.2、16</td>
+<td>不可；先定义 QueueDirectory 最小契约再推进队列状态机</td>
+</tr>
+<tr>
+<td>issuer 路由故障如何处理</td>
+<td>7.5、9.2</td>
+<td>需显式故障矩阵与补救流程，默认 renew/release fail-closed</td>
+</tr>
+<tr>
+<td>lane 决策与重试语义如何收敛</td>
+<td>8.5、13、16</td>
+<td>必须记录 lane 决策点；同幂等域默认禁止重试改 lane</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="13">13. 待验证假设（必须实证）<a class="headerlink" href="#13" title="Permanent link">&para;</a></h2>
+<ol>
+<li>拓扑干扰指标 <code>I</code> 的可观测性是否足够稳定。</li>
+<li>模式切换阈值对业务的敏感度。</li>
+<li>retention handle TTL 与 queue lease 预算之间的最优比例。</li>
+<li>Node Agent/协调入口失效重试下，计划步骤幂等合流的实际成功率。</li>
+<li>共享KV目录粒度（摘要粒度）对命中率与控制面成本的最优平衡点。</li>
+<li>不同 lane 下 GS 回源率与 P99 控制时延的拐点区间（用于量化 scaling 潜力）。</li>
+<li>扩展场景（检查点/装配/恢复）在三轨下的稳态切换成本与回滚时延。</li>
+<li>QueueDirectory 的 bounded-stale 窗口对 leader 误判率与故障恢复时长的影响。</li>
+<li>同一 idempotency 域内“禁止 lane 变更”对重试成功率与副作用抑制的净收益。</li>
+</ol>
+<p>这些验证结果将决定参数，不改变主框架方向。</p>
+<hr />
+<h2 id="14">14. 架构重构执行规划（高层）<a class="headerlink" href="#14" title="Permanent link">&para;</a></h2>
+<p>本节把“怎么改”收敛为架构级计划，按你要求明确三点：</p>
+<ol>
+<li>与现有模块关系；</li>
+<li>重构方向；</li>
+<li>重构范围。</li>
+</ol>
+<h3 id="141-wave-based">14.1 执行路线图（Wave-based）<a class="headerlink" href="#141-wave-based" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart LR
+  W0[Wave 0&lt;br/&gt;治理规则固化] --&gt; W1[Wave 1&lt;br/&gt;Lane-aware Local Executor]
+  W1 --&gt; W2[Wave 2&lt;br/&gt;Shard协调能力]
+  W2 --&gt; W3[Wave 3&lt;br/&gt;共享KV轻目录 + 迁移闭环]
+  W3 --&gt; W4[Wave 4&lt;br/&gt;全局自动化调参]</code></pre>
+<h3 id="142-wave">14.2 Wave 与现有模块映射<a class="headerlink" href="#142-wave" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Wave</th>
+<th>目标</th>
+<th>关联现有模块</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>W0</td>
+<td>固化术语与契约（lane/mode/policy、审计键、Directory 契约族）+ GS 选源去热化清单与指标闸门 + QueueDirectory 最小契约（PR-08a）</td>
+<td><code>docs/distributed-coordination-series/*</code>, <code>core/store/materialization/control/*</code>, <code>tensorcast/global_store/services/*</code></td>
+</tr>
+<tr>
+<td>W1</td>
+<td>Node Agent 执行面统一（主轴）+ daemon 执行入口 lane-aware + LaneContext 透传闭环（plan+非plan）+ 动作幂等/重试护栏（placement pin 等）</td>
+<td><code>tensorcast/node_agent/*</code>, <code>daemon/service/controllers/*</code>, <code>daemon/state/*</code>, <code>tensorcast/api/plan/*</code>, <code>tensorcast/api/store/*</code></td>
+</tr>
+<tr>
+<td>W2</td>
+<td>引入 shard 协调（可先内嵌 daemon）</td>
+<td><code>daemon/*</code>（新协调子模块）, <code>tensorcast/global_store/services/*</code></td>
+</tr>
+<tr>
+<td>W3</td>
+<td>上线共享KV摘要目录与迁移编排</td>
+<td><code>tensorcast/global_store/repositories/*</code>, <code>schema.sql</code>, <code>proto/tensorcast/global_store/v1/*</code></td>
+</tr>
+<tr>
+<td>W4</td>
+<td>自动化策略收敛与模式切换</td>
+<td><code>tensorcast/global_store/metrics.py</code>, <code>daemon</code>/<code>sdk</code> observability 相关模块</td>
+</tr>
+</tbody>
+</table>
+<p>补充关系矩阵（统一 SoT，避免平行组件）：</p>
+<table>
+<thead>
+<tr>
+<th>组件</th>
+<th>SoT 边界</th>
+<th>必须做的事</th>
+<th>不应做的事</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SDK (<code>tensorcast/api/store/*</code>, <code>tensorcast/api/plan/*</code>)</td>
+<td>请求上下文与轻缓存</td>
+<td>透传 lane/policy、保留本地读缓存</td>
+<td>承担跨节点仲裁或全局一致性</td>
+</tr>
+<tr>
+<td>Daemon (<code>daemon/service/controllers/*</code>, <code>daemon/state/*</code>)</td>
+<td>高频执行状态与本地状态机</td>
+<td>本地择源执行、queue/lease/credit 推进、失败回源</td>
+<td>把高频状态上推 GS 热写</td>
+</tr>
+<tr>
+<td>Node Agent (<code>node_agent.proto</code>, <code>tensorcast/node_agent/*</code>)</td>
+<td>计划执行主轴</td>
+<td>执行 DAG、聚合步骤状态、与 daemon 协同</td>
+<td>与 daemon/gateway 形成第二套独立执行语义</td>
+</tr>
+<tr>
+<td>Global Store (<code>global_store/services/*</code>, <code>schema.sql</code>, <code>operation.proto</code>)</td>
+<td>全局真相与围栏边界</td>
+<td>membership、lease/fencing、硬预算、目录真相</td>
+<td>承接 per-item 热状态推进</td>
+</tr>
+<tr>
+<td>QueueDirectory（基于 GS 目录语义）</td>
+<td><code>queue identity -&gt; leader endpoint -&gt; epoch fencing</code></td>
+<td>稳定发现与 bounded-stale 控制</td>
+<td>复制一套与 operation lease 脱节的队列围栏体系</td>
+</tr>
+</tbody>
+</table>
+<h3 id="143-wave">14.3 每个 Wave 的重构方向与改变范围<a class="headerlink" href="#143-wave" title="Permanent link">&para;</a></h3>
+<h4 id="w1lane-aware-local-executor">W1：Lane-aware Local Executor（中改动）<a class="headerlink" href="#w1lane-aware-local-executor" title="Permanent link">&para;</a></h4>
+<ol>
+<li>方向：</li>
+<li>保持 daemon 本地状态机核心地位；</li>
+<li>以 Node Agent 为默认 Plan 执行器；</li>
+<li>在执行入口引入 lane 策略分派，并形成 LaneContext 审计闭环（plan+非plan）；</li>
+<li>
+<p>在启用跨进程重试前补齐动作幂等护栏（placement pin join key 或显式不可重试）。</p>
+</li>
+<li>
+<p>范围：</p>
+</li>
+<li><code>daemon/service/controllers/*</code></li>
+<li><code>daemon/state/session_lifecycle*</code></li>
+<li><code>tensorcast/api/plan/plan.py</code></li>
+<li><code>tensorcast/node_agent/server.py</code>, <code>tensorcast/node_agent/executor.py</code></li>
+</ol>
+<h4 id="w2shard">W2：Shard 协调层（中到高改动）<a class="headerlink" href="#w2shard" title="Permanent link">&para;</a></h4>
+<ol>
+<li>方向：</li>
+<li>增加 Global 与 Local 之间的中层协调；</li>
+<li>
+<p>把热点治理与迁移决策从 GS 热路径中剥离。</p>
+</li>
+<li>
+<p>范围：</p>
+</li>
+<li><code>daemon</code> 新增协调子模块（或 sidecar）</li>
+<li><code>tensorcast/global_store/services/*</code> 增加 shard 相关协调接口</li>
+<li><code>proto/tensorcast/operation/v1/*</code> 与 <code>global_store/v1/*</code> 增量扩展</li>
+</ol>
+<h4 id="w3kv">W3：共享KV轻目录（高改动）<a class="headerlink" href="#w3kv" title="Permanent link">&para;</a></h4>
+<ol>
+<li>方向：</li>
+<li>不记录全量高基数KV对象；</li>
+<li>记录热点摘要与副本质量，用于迁移与均衡；</li>
+<li>
+<p>与现有 <code>artifact_replicas.export_state/export_generation</code> 严格绑定，避免目录“指向旧副本”。</p>
+</li>
+<li>
+<p>范围：</p>
+</li>
+<li><code>schema.sql</code> 新表/视图</li>
+<li><code>tensorcast/global_store/repositories/*</code></li>
+<li><code>tensorcast/global_store/rpc/*</code></li>
+</ol>
+<h4 id="w4">W4：自动化治理（中改动）<a class="headerlink" href="#w4" title="Permanent link">&para;</a></h4>
+<ol>
+<li>方向：</li>
+<li>从人工阈值运营转向闭环调优；</li>
+<li>
+<p>保持 kill switch 与回滚优先。</p>
+</li>
+<li>
+<p>范围：</p>
+</li>
+<li>指标、审计、策略发布与回滚控制面</li>
+</ol>
+<h3 id="144">14.4 变更边界（避免失控）<a class="headerlink" href="#144" title="Permanent link">&para;</a></h3>
+<ol>
+<li>不改动数据面核心语义：</li>
+<li>
+<p>P2P/RDMA/MTCP、StoreEngine materialization 主路径保持稳定。</p>
+</li>
+<li>
+<p>不改动对象模型核心语义：</p>
+</li>
+<li>
+<p>维持 Artifact-first，不引入并行数据对象系统。</p>
+</li>
+<li>
+<p>优先控制面增量演进：</p>
+</li>
+<li>先治理，再自动化，再大规模切换。</li>
+</ol>
+<hr />
+<h2 id="15-adr-lite">15. 统一决策清单（ADR-lite）<a class="headerlink" href="#15-adr-lite" title="Permanent link">&para;</a></h2>
+<p>本节用于“最终拍板”，统一口径为：</p>
+<ol>
+<li>与现有模块关系；</li>
+<li>重构方向；</li>
+<li>改变范围；</li>
+<li>回滚护栏。</li>
+</ol>
+<table>
+<thead>
+<tr>
+<th>ADR</th>
+<th>决策主题</th>
+<th>与现有模块关系</th>
+<th>重构方向</th>
+<th>改变范围</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ADR-01</td>
+<td>三轨数据路径（catalog/stream/shared-cache）</td>
+<td>复用 <code>Artifact-first</code>、<code>daemon controllers</code>、<code>global_store registry</code></td>
+<td>从隐式策略切换到显式 lane 治理</td>
+<td>中（控制面与策略层）</td>
+</tr>
+<tr>
+<td>ADR-02</td>
+<td>KV 双形态治理（PD流式 vs Decoder共享）</td>
+<td>复用 <code>session_lifecycle</code>、<code>retention_registry</code>、<code>operation lease</code></td>
+<td>把单一 KV 策略拆分为两条治理链路</td>
+<td>中（策略与路由层）</td>
+</tr>
+<tr>
+<td>ADR-03</td>
+<td>Global/Shard/Local 三层协调</td>
+<td>复用 GS 仲裁与 daemon 执行；新增 shard 协调能力</td>
+<td>控制面分层化，降低 GS 热路径压力</td>
+<td>高（新增中层协调）</td>
+</tr>
+<tr>
+<td>ADR-04</td>
+<td>Lane Compiler（策略编译器）</td>
+<td>对接 <code>sdk hint</code>、<code>plan</code>、<code>node_agent</code>、<code>daemon dispatch</code></td>
+<td>策略配置化、可审计、可回放</td>
+<td>中（SDK+node_agent+daemon+治理面）</td>
+</tr>
+<tr>
+<td>ADR-05</td>
+<td>共享KV轻目录（摘要目录）</td>
+<td>基于 <code>schema.sql</code>、<code>global_store repos/services</code> 扩展</td>
+<td>全量目录 -&gt; 热点摘要目录</td>
+<td>高（schema + GS 服务）</td>
+</tr>
+<tr>
+<td>ADR-06</td>
+<td>双平面负载均衡（data/meta）</td>
+<td>data-plane 复用 <code>StoreEngine/P2P</code>; meta-plane 扩展 GS/shard 策略</td>
+<td>本地快选源 + 全局/分片反热点</td>
+<td>中高（执行层+治理层）</td>
+</tr>
+<tr>
+<td>ADR-07</td>
+<td>一致性边界最小化</td>
+<td>复用 <code>operation.proto</code> fencing、token 语义</td>
+<td>强一致仅覆盖 ownership/fencing</td>
+<td>低（原则约束）</td>
+</tr>
+<tr>
+<td>ADR-08</td>
+<td>Wave 化重构落地</td>
+<td>复用现有模块并分阶段推进</td>
+<td>先低风险治理，后中高风险跃迁</td>
+<td>低到高（按波次渐进）</td>
+</tr>
+</tbody>
+</table>
+<h3 id="151-adr">15.1 每条 ADR 的回滚护栏（统一模板）<a class="headerlink" href="#151-adr" title="Permanent link">&para;</a></h3>
+<p>每条 ADR 统一要求以下回滚能力：</p>
+<ol>
+<li><code>Kill Switch</code>：可按 lane/场景一键降级到 Local-First 或现网稳定模式。</li>
+<li><code>Read-Only Fallback</code>：协调层异常时可退回仅执行、停止新治理动作。</li>
+<li><code>Fencing Strict Mode</code>：任何不确定状态默认 fail-closed，不放宽 ownership/epoch 校验。</li>
+<li><code>Metrics Gate</code>：若关键指标连续超阈值（SLA、错误率、GS 压力），自动触发回滚。</li>
+</ol>
+<h3 id="152">15.2 拍板优先级建议（从高到低）<a class="headerlink" href="#152" title="Permanent link">&para;</a></h3>
+<ol>
+<li><code>ADR-07</code>（一致性边界最小化）  </li>
+<li><code>ADR-01</code>（三轨数据路径）  </li>
+<li><code>ADR-02</code>（KV 双形态治理）  </li>
+<li><code>ADR-08</code>（Wave 执行路线）  </li>
+<li><code>ADR-04</code>（Lane Compiler）  </li>
+<li><code>ADR-06</code>（双平面负载均衡）  </li>
+<li><code>ADR-05</code>（共享KV轻目录）  </li>
+<li><code>ADR-03</code>（三层协调器完全体）  </li>
+</ol>
+<p>原因：</p>
+<ol>
+<li>先固化边界与分轨，才能避免后续实现反复摇摆。</li>
+<li>再推进策略编译与均衡优化，最后再做架构级新增层，风险更可控。</li>
+</ol>
+<hr />
+<h2 id="16">16. 先做“局部重构”是否更有利（结论：是）<a class="headerlink" href="#16" title="Permanent link">&para;</a></h2>
+<p>你的这个判断是正确的。对长期目标而言，先做几项“高杠杆局部重构”可以显著降低后续大改风险。</p>
+<h3 id="161-pre-refactor-set">16.1 局部重构优先清单（Pre-Refactor Set）<a class="headerlink" href="#161-pre-refactor-set" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>PR</th>
+<th>局部重构项</th>
+<th>与现有模块关系</th>
+<th>重构方向</th>
+<th>改变范围</th>
+<th>解锁后续</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PR-01</td>
+<td>Capability Directory 契约复用扩展（带 staleness 预算）</td>
+<td>复用 <code>tensorcast/capability_directory.py</code> 的目录语义与失效策略；daemon 侧采用同契约本地实现</td>
+<td>在既有目录语义基础上补 daemon 侧接入与 staleness 预算；定义长期收敛到 daemon-served signals/directory（0056）的迁移口径；并为 transport 候选提供读模型</td>
+<td>低到中（daemon + SDK 读路径）</td>
+<td>ADR-01, ADR-04</td>
+</tr>
+<tr>
+<td>PR-02</td>
+<td>执行入口路由抽象层（Routing Interface）</td>
+<td>覆盖 <code>daemon/service/controllers/*</code> 与 GS client 调用点</td>
+<td>将“如何选源”从业务流程剥离成可替换策略层，并先去热化 GS 每请求选源（保持 claim/reservation 等价语义）</td>
+<td>中（daemon 控制层）</td>
+<td>ADR-04, ADR-06</td>
+</tr>
+<tr>
+<td>PR-03</td>
+<td>统一 LaneContext 透传（SDK-&gt;Daemon）</td>
+<td>复用 <code>CallContext</code>、<code>plan</code>、daemon RPC 请求上下文</td>
+<td>覆盖 plan 与非 plan RPC（materialize/prefetch 等）的 lane/policy_version 显式透传；非 plan v0 先用 gRPC metadata，避免隐式约定</td>
+<td>低到中（SDK + daemon 协议增量）</td>
+<td>ADR-01, ADR-02</td>
+</tr>
+<tr>
+<td>PR-04</td>
+<td>高频状态机事件化（本地事件日志/回放钩子）</td>
+<td>基于 <code>session_lifecycle</code>、<code>retention_registry</code> 扩展</td>
+<td>为 queue/kv 高频状态提供可观察、可回放基座</td>
+<td>中（daemon state）</td>
+<td>ADR-02, ADR-03</td>
+</tr>
+<tr>
+<td>PR-05</td>
+<td>热点与迁移可观测最小闭环</td>
+<td>覆盖 <code>global_store/metrics.py</code>、daemon 指标</td>
+<td>先做指标闭环，再做自动迁移闭环</td>
+<td>低（观测层）</td>
+<td>ADR-05, ADR-06</td>
+</tr>
+<tr>
+<td>PR-06</td>
+<td>KV 双形态统一键空间契约</td>
+<td>复用 <code>selection_identity</code> 与 capability/fencing 语义</td>
+<td>统一 <code>kv_streaming/kv_shared</code> 的身份与围栏口径</td>
+<td>中（common + daemon + 规划协议）</td>
+<td>ADR-02, ADR-05</td>
+</tr>
+<tr>
+<td>PR-07</td>
+<td>Node Agent 执行面统一</td>
+<td>复用 <code>node_agent.proto</code>、<code>node_agent/server.py</code>、<code>node_agent/executor.py</code></td>
+<td>以现有 <code>ExecutePlan</code> 为主执行面，避免双执行面；补齐 <code>NodeAgentDirectory</code>（<code>instance_id -&gt; node_agent_endpoint</code>）与 SDK 侧 discovery/client，使 <code>Plan.run</code> 能分发 instance steps 并形成审计闭环</td>
+<td>低到中（plan + node_agent）</td>
+<td>ADR-04, ADR-08</td>
+</tr>
+<tr>
+<td>PR-08a</td>
+<td>QueueDirectory 最小契约（前置）</td>
+<td>复用 <code>operation lease</code>、<code>capability_token.queue_epoch</code>、worker/instance 目录语义</td>
+<td>先定义发现/围栏边界与 bounded-stale 预算，再落 queue 本地状态机</td>
+<td>中（GS目录+daemon queue）</td>
+<td>ADR-01, ADR-07</td>
+</tr>
+<tr>
+<td>PR-08b</td>
+<td>issuer 故障语义与回收机制</td>
+<td>复用 <code>retention_registry</code>、issuer 路由、tombstone/grace TTL 机制</td>
+<td>在 PR-08a 契约之上完善故障分级恢复与回收</td>
+<td>中（daemon queue+恢复流程）</td>
+<td>ADR-01, ADR-07</td>
+</tr>
+</tbody>
+</table>
+<h3 id="162">16.2 为什么这些局部重构“先做更优”<a class="headerlink" href="#162" title="Permanent link">&para;</a></h3>
+<ol>
+<li>它们都不破坏现有数据面主路径（P2P/RDMA/MTCP）。</li>
+<li>它们直接降低未来大改的不确定性（尤其是 ADR-03/ADR-05 的高风险项）。</li>
+<li>它们把“策略讨论”提前变成“系统能力”，避免后续返工。</li>
+</ol>
+<h3 id="163-90">16.3 建议的最小启动组合（90 天）<a class="headerlink" href="#163-90" title="Permanent link">&para;</a></h3>
+<p>建议先启动：<code>PR-01 + PR-02 + PR-03 + PR-05 + PR-07</code>；若 90 天窗口内包含 queue 试点，则并行加入 <code>PR-08a</code>。</p>
+<p>原因：</p>
+<ol>
+<li>这五项能最快形成“可治理、可观测、可回滚、执行面不分叉”的基础盘。</li>
+<li>它们对现网侵入相对可控，不要求立即引入 shard 新层。</li>
+<li>完成后再推进 <code>PR-04/PR-06/PR-08b</code>，会显著降低实现复杂度。</li>
+</ol>
+<p>说明：</p>
+<ol>
+<li><code>PR-01</code> 明确要求“复用已有 capability directory 语义与失效策略”，避免平行建设目录协议。</li>
+<li>若需新能力，优先定义为 <code>CapabilityDirectory</code> 的增量接口（如 transport 候选摘要）；daemon 采用本地实现对齐语义，不直接依赖 Python 实现。</li>
+</ol>
+<h3 id="164-wave">16.4 与 Wave 路线的对应<a class="headerlink" href="#164-wave" title="Permanent link">&para;</a></h3>
+<ol>
+<li><code>Wave 0/1</code>：优先落 <code>PR-01/PR-02/PR-03/PR-05/PR-07</code>，若含 queue 试点则同步落 <code>PR-08a</code>。</li>
+<li><code>Wave 2</code>：引入 <code>PR-04</code> 作为 shard 协调前置能力。</li>
+<li><code>Wave 3</code>：引入 <code>PR-06/PR-08b</code>，再上共享KV轻目录与迁移编排。</li>
+</ol>
+<h3 id="165">16.5 为什么“先局部重构”更利于长期目标（因果链）<a class="headerlink" href="#165" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>flowchart LR
+  A[现状: GS易热化 + 路由耦合业务流程] --&gt; B[PR-01/02/03/07&lt;br/&gt;先解耦读路径与路由入口并统一执行面]
+  B --&gt; C[形成 lane 可观测与可替换策略接口]
+  C --&gt; D[PR-05&lt;br/&gt;形成热点/迁移指标闭环]
+  D --&gt; E[PR-04/06&lt;br/&gt;补齐高频状态回放与KV双形态契约]
+  E --&gt; F[再进入 ADR-03/05 高改动项]
+  F --&gt; G[长期目标: 分层协调 + 近似全局最优]</code></pre>
+<p>核心逻辑：</p>
+<ol>
+<li>局部重构先把“接口与观测”稳定下来，再动“大结构”，可逆性更高。</li>
+<li>大改（如 shard 协调层、共享KV目录）依赖前置数据与策略接口，否则容易反复返工。</li>
+<li>在 TensorCast 当前规模与吞吐约束下，这种顺序能以更低风险获得更高演进速度。</li>
+</ol>
+<h3 id="166">16.6 对你的核心场景，局部重构的直接收益<a class="headerlink" href="#166" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>优先局部重构</th>
+<th>立即收益</th>
+<th>长期收益</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>权重加载（大对象、低频）</td>
+<td><code>PR-01</code>, <code>PR-02</code></td>
+<td>降低目录回源与路由抖动，扩容高峰更稳</td>
+<td>为 <code>catalog-first</code> 与全局预算治理提供稳定入口</td>
+</tr>
+<tr>
+<td>PD 流式 KV（高频、短停留）</td>
+<td><code>PR-02</code>, <code>PR-03</code>, <code>PR-04</code></td>
+<td>高频状态留在 daemon，减少 GS 热写</td>
+<td>为 <code>stream-first</code> + shard 协调奠定状态机与回放基础</td>
+</tr>
+<tr>
+<td>Decoder 共享 KV（中寿命、热点复用）</td>
+<td><code>PR-05</code>, <code>PR-06</code></td>
+<td>先识别热点/迁移收益，避免盲目目录化</td>
+<td>为“轻目录 + 迁移编排”降低试错成本</td>
+</tr>
+</tbody>
+</table>
+<h3 id="167">16.7 哪些改造不建议先做（避免高成本返工）<a class="headerlink" href="#167" title="Permanent link">&para;</a></h3>
+<ol>
+<li>
+<p>不建议先上“完整三层协调器”再补观测与接口抽象。<br />
+原因：没有 <code>PR-02/PR-05</code> 的基座，协调器会变成不可验证的复杂黑盒。</p>
+</li>
+<li>
+<p>不建议先把高基数 KV 全量写入 GS。<br />
+原因：会把原本应在 daemon 本地推进的热状态中心化，放大单点瓶颈。</p>
+</li>
+<li>
+<p>不建议用单一策略同时治理 <code>PD流式KV</code> 与 <code>Decoder共享KV</code>。<br />
+原因：两者目标函数不同（吞吐推进 vs 命中与迁移），统一策略会两头不优。</p>
+</li>
+</ol>
+<h3 id="168">16.8 你当前可直接拍板的“先行重构组合”<a class="headerlink" href="#168" title="Permanent link">&para;</a></h3>
+<p>建议先拍板以下顺序（保持 90 天内可落地）：</p>
+<ol>
+<li><code>PR-02</code>（路由抽象层）+ <code>PR-03</code>（LaneContext 透传）作为语义底座。</li>
+<li><code>PR-07</code>（Node Agent 执行面统一）避免后续双执行面返工。</li>
+<li><code>PR-01</code>（目录缓存读模型）降低 GS 热路径压力。</li>
+<li><code>PR-05</code>（观测闭环）作为后续 ADR 的上线门槛。</li>
+<li>若 queue 试点立项，先补 <code>PR-08a</code>（QueueDirectory 前置契约）。</li>
+<li>再进入 <code>PR-04</code> / <code>PR-06</code> / <code>PR-08b</code>，最后推进 ADR-03/05 高改动项。</li>
+</ol>
+<p>这套顺序的本质是：先把系统变成“可测、可控、可回滚”，再做大重构。</p>
+<hr />
+<h2 id="17-scaling">17. Scaling 规模目标与架构决策映射<a class="headerlink" href="#17-scaling" title="Permanent link">&para;</a></h2>
+<p>本节回答你新增的核心问题：不同决策对集群规模到底有什么影响。</p>
+<h3 id="171">17.1 先统一口径：规模不是节点数单指标<a class="headerlink" href="#171" title="Permanent link">&para;</a></h3>
+<p>建议把“可扩展规模”定义为三维同时满足：</p>
+<ol>
+<li>节点规模：可稳定运行的 daemon/instance 数量；</li>
+<li>控制面规模：单位时间可承载的状态推进（lease/route/queue/kv 控制事件）；</li>
+<li>扰动恢复规模：局部故障或扩容风暴下的恢复时间与抖动幅度。</li>
+</ol>
+<p>只有三维都达标，才算真正可 scale。</p>
+<h3 id="172">17.2 现状与目标的规模潜力差异（按架构阶段）<a class="headerlink" href="#172" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>阶段</th>
+<th>架构特征</th>
+<th>规模潜力结论</th>
+<th>主要限制项</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Stage-A</code> 现状偏中心化</td>
+<td>GS 参与较多路由与目录路径</td>
+<td>可支撑中小规模，但高频场景下上限受 GS 约束明显</td>
+<td>GS 单点控制面、热路径回源</td>
+</tr>
+<tr>
+<td><code>Stage-B</code> 局部重构后</td>
+<td>daemon 目录缓存 + 路由抽象 + lane hint</td>
+<td>规模潜力明显提升到中规模，且扩展斜率更平滑</td>
+<td>缓存一致性与回源策略</td>
+</tr>
+<tr>
+<td><code>Stage-C</code> 三轨治理稳定</td>
+<td>高频状态机下沉 daemon，本地推进</td>
+<td>可进入中大规模区间，混合负载稳定性大幅提升</td>
+<td>热点治理与迁移策略成熟度</td>
+</tr>
+<tr>
+<td><code>Stage-D</code> 分层协调完成</td>
+<td>Global/Shard/Local 协同</td>
+<td>才具备进一步冲击更大规模的架构条件</td>
+<td>shard 协调复杂度与运维成熟度</td>
+</tr>
+</tbody>
+</table>
+<p>说明：</p>
+<ol>
+<li>我们不在文档里承诺“固定节点数”，因为当前仓库没有统一基准压测结果可直接给出硬值。</li>
+<li>但可以确定的是，<code>Stage-A -&gt; Stage-C</code> 的核心收益来自“把高频控制状态移出 GS 热路径”。</li>
+</ol>
+<h3 id="173">17.3 与现有模块的直接关系（你关心的落地性）<a class="headerlink" href="#173" title="Permanent link">&para;</a></h3>
+<ol>
+<li>限制现状规模的关键模块：</li>
+<li><code>tensorcast/global_store/services/transport_service.py</code></li>
+<li><code>tensorcast/global_store/services/worker_service.py</code></li>
+<li>
+<p><code>tensorcast/global_store/repositories/operation_repository.py</code></p>
+</li>
+<li>
+<p>提升规模潜力的关键改造入口：</p>
+</li>
+<li><code>daemon/service/controllers/*</code>（路由与执行入口解耦）</li>
+<li><code>daemon/state/session_lifecycle.*</code>、<code>daemon/state/retention_registry.*</code>（高频状态机本地化）</li>
+<li>
+<p><code>tensorcast/api/plan/plan.py</code>、<code>tensorcast/api/store/*</code>（lane hint + 上下文透传）</p>
+</li>
+<li>
+<p>进一步放大规模的中层能力：</p>
+</li>
+<li>shard 协调与轻目录（<code>global_store services/repos + proto/schema</code> 增量扩展）</li>
+</ol>
+<h3 id="174">17.4 推荐的规模推进方式（避免一开始就追“大而全”）<a class="headerlink" href="#174" title="Permanent link">&para;</a></h3>
+<ol>
+<li>第一阶段目标：先把 GS 从“热执行中心”降为“边界仲裁中心”。</li>
+<li>第二阶段目标：再把热点治理从 GS 拆到 shard/local。</li>
+<li>第三阶段目标：最后再追求更高层次的近似全局最优。</li>
+</ol>
+<p>这个顺序最符合当前 TensorCast 代码现状，也最符合你提的长期最优演进路线。</p>
+<hr />
+<h2 id="18-kv">18. 场景扩展与泛化：不止权重与 KV<a class="headerlink" href="#18-kv" title="Permanent link">&para;</a></h2>
+<p>你提到希望验证思路能否泛化，这一节给出扩展场景与裁决映射。</p>
+<h3 id="181">18.1 扩展场景清单（基于现有模块能力）<a class="headerlink" href="#181" title="Permanent link">&para;</a></h3>
+<ol>
+<li><code>S-1 检查点持久化与回放</code></li>
+<li>关联模块：<code>core/checkpoint/*</code>, <code>daemon/state/persistence_manager.*</code>, <code>global_store placement_service.py</code></li>
+<li>
+<p>特征：对象大、频率中低、恢复时突发。</p>
+</li>
+<li>
+<p><code>S-2 View Piece 装配与 Seal</code></p>
+</li>
+<li>关联模块：<code>daemon/service/controllers/registration_controller.cc</code>, <code>tensorcast/global_store/services/view_state_service.py</code></li>
+<li>
+<p>特征：元数据编排复杂，数据面可并行，seal 前后状态切换关键。</p>
+</li>
+<li>
+<p><code>S-3 大规模滚动发布预热</code></p>
+</li>
+<li>关联模块：<code>tensorcast/api/store/artifact.py</code> prefetch、<code>daemon/service/controllers/materialization_controller.cc</code></li>
+<li>
+<p>特征：短时并发上升，拓扑干扰大，之后迅速回落。</p>
+</li>
+<li>
+<p><code>S-4 队列化中间特征流（非 KV）</code></p>
+</li>
+<li>关联模块：<code>0060</code> 提案（queue lease/credit）、<code>daemon/state/retention_registry.*</code></li>
+<li>
+<p>特征：高频短寿命，生产消费速率可能失衡。</p>
+</li>
+<li>
+<p><code>S-5 故障恢复与状态重建</code></p>
+</li>
+<li>关联模块：<code>global_store recovery_service.py</code>, <code>worker_service.py</code>, <code>daemon ha/state sync</code></li>
+<li>特征：平时低频，故障窗口内控制流密度激增。</li>
+</ol>
+<h3 id="182">18.2 泛化裁决矩阵（映射到三轨）<a class="headerlink" href="#182" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>默认 lane</th>
+<th>默认模式</th>
+<th>GS 角色</th>
+<th>Daemon 角色</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>S-1 检查点持久化/回放</td>
+<td><code>catalog-first</code></td>
+<td><code>Budgeted-Hybrid</code></td>
+<td>计划与边界预算、状态归档</td>
+<td>执行与重试、局部流控</td>
+</tr>
+<tr>
+<td>S-2 View 装配/Seal</td>
+<td><code>catalog-first + shared-cache</code></td>
+<td><code>Budgeted-Hybrid</code></td>
+<td>维护装配元数据与 seal 边界</td>
+<td>负责 piece 执行与本地拼装</td>
+</tr>
+<tr>
+<td>S-3 滚动预热</td>
+<td><code>catalog-first</code>（必要时混合）</td>
+<td><code>Global-Governed</code>（短时）</td>
+<td>扩容窗口做预算与反热点</td>
+<td>本地择源与并发门控</td>
+</tr>
+<tr>
+<td>S-4 队列化中间流</td>
+<td><code>stream-first</code></td>
+<td><code>Local-First</code></td>
+<td>仅做 epoch/fencing 与目录发现</td>
+<td>broker 本地推进 lease/credit</td>
+</tr>
+<tr>
+<td>S-5 故障恢复</td>
+<td><code>catalog-first</code></td>
+<td><code>Global-Governed</code>（恢复窗口）</td>
+<td>真相恢复与边界重建</td>
+<td>本地状态对账与补偿执行</td>
+</tr>
+</tbody>
+</table>
+<h3 id="183">18.3 泛化是否成立：判定标准<a class="headerlink" href="#183" title="Permanent link">&para;</a></h3>
+<p>如果新场景满足以下判定，则可直接纳入本框架而无需新建体系：</p>
+<ol>
+<li>能用七维画像描述（<code>L</code>、<code>lambda_p</code>、<code>lambda_c</code>、<code>gN/gB</code>、<code>E[size]/p95</code>、<code>R</code>、<code>I</code>）；</li>
+<li>能落到三轨之一（或受控混合）；</li>
+<li>一致性边界仍可由 <code>lease/fencing</code> 覆盖；</li>
+<li>出现异常时可退回 <code>Local-First</code> 或 <code>Global-Governed</code> 保守模式。</li>
+</ol>
+<p>满足以上四点，说明这套架构具有可泛化性，而不是只服务于“权重 + KV”。</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

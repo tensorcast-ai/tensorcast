@@ -1,0 +1,2964 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/plans/0115-composite-materialization-and-vectored-direct-write/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Composite Materialization and Vectored Direct-Write Plan - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#objective" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Composite Materialization and Vectored Direct-Write Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="objective">Objective<a class="headerlink" href="#objective" title="Permanent link">&para;</a></h1>
+<p>Implement the shared execution capability defined by <code>0115</code>:</p>
+<ul>
+<li>first-class composite source -&gt; composite target materialization in the
+  shared dataplane,</li>
+<li>routed communicator <code>read_plan(...)</code>,</li>
+<li>and RDMA vectored direct-write realization over request-scoped destination
+  regions.</li>
+</ul>
+<p>This plan intentionally owns the generic capability, not the byte-artifact
+consumer path. <code>0087-01</code> may consume the result later but must not redefine it.</p>
+<h1 id="starting-state-grounding">Starting State &amp; Grounding<a class="headerlink" href="#starting-state-grounding" title="Permanent link">&para;</a></h1>
+<p>At plan start, before the implementation below landed:</p>
+<ul>
+<li><code>SeekableSource</code> exposes <code>read_at(...)</code> and <code>read_into_at(...)</code>, but not a
+  first-class batched direct-write contract.</li>
+<li>The default <code>SeekableSource::readv_into_at(...)</code> compatibility loop is not a
+  safe signal for pre-issue vectored capability fallback because it may already
+  have issued earlier scalar writes when a later op fails.</li>
+<li>Batched-capable sources must now converge on two-phase semantics: deterministic
+  validation errors are pre-issue and must not mutate the target before the
+  batch is issued.</li>
+<li><code>pump_ranges(...)</code> already owns the shared direct-write fast path, but it
+  still plans and executes one window at a time.</li>
+<li><code>ByteRangeMappedSource</code> already represents composite sources, but current
+  convenience helpers still reject <code>mapping.num_sources != 1</code> in important
+  paths.</li>
+<li><code>RemoteKeySource</code> already supports direct-write into CPU windows, but it
+  still issues one logical read at a time.</li>
+<li>communicator routing and engine only expose <code>read_tensor(...)</code>, not a public
+  vectored pull plan.</li>
+<li><code>RdmaTransport::read_multi(...)</code> can post many WRs, but its current request
+  model assumes one local MR for the whole request.</li>
+<li><code>0087-01</code> currently depends on a generic capability that does not yet exist:
+  sink-side no-mirror is landed, but source-side no-pack segmented export and
+  true batch direct-write still need the common primitive owned here.</li>
+<li>The repo already has useful test anchors that should absorb most of this
+  work rather than creating an entirely separate test stack:
+  <code>pump_direct_test.cc</code>, <code>mux_seekable_source_test.cc</code>,
+  <code>remote_key_source_routing_fallback_test.cc</code>, <code>routing_context_test.cc</code>,
+  <code>rdma_engine_test.cc</code>, <code>staging_flow_controller_test.cc</code>,
+  <code>request_test.cc</code>, and <code>materialization_facade_test.cc</code>.</li>
+</ul>
+<h1 id="phases-milestones">Phases &amp; Milestones<a class="headerlink" href="#phases-milestones" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Phase 1: Contract Freeze</li>
+<li>[x] Milestone 1.1: Land <code>0115</code> design and this plan as the sole owner of
+    the generic capability.</li>
+<li>[x] Milestone 1.2: Freeze the <code>DirectWriteOp</code>, <code>readv_into_at(...)</code>, and
+    <code>ReadPlan</code> contract shapes before implementation starts.</li>
+<li>[x] Milestone 1.3: Freeze the failure rule that forbids in-place staged
+    fallback after a vectored direct-write batch is issued.</li>
+<li>[x] Milestone 1.4: Freeze the rule that <code>supports_direct_write_at()</code> is a
+    coarse hint and that final fast-path eligibility is decided only during
+    pre-issue prepare.</li>
+<li>
+<p>[x] Milestone 1.5: Freeze the rule that fallback-bearing sources must be
+    pre-issue frozen to one execution branch before entering vectored
+    direct-write.</p>
+</li>
+<li>
+<p>[x] Phase 2: Shared Dataplane Batched Direct-Write</p>
+</li>
+<li>[x] Milestone 2.1: Add <code>DirectWriteOp</code> and default
+    <code>SeekableSource::readv_into_at(...)</code>.<ul>
+<li>[x] 2.1.a: Introduce <code>DirectWriteOp</code> in the shared source contract with
+  stable byte-space semantics.</li>
+<li>[x] 2.1.b: Add the default <code>readv_into_at(...)</code> loop implementation and
+  thread it through wrapper or adapter sources that currently forward only
+  <code>read_at(...)</code> and <code>read_into_at(...)</code>.</li>
+<li>[x] 2.1.c: Preserve backward compatibility for sources that do not
+  override batching.</li>
+<li>[x] 2.1.test: Extend
+  <code>core/store/materialization/dataplane/runtime/tests/pump_direct_test.cc</code>
+  or an adjacent source-contract suite to cover zero-op no-op,
+  ordered multi-op execution, exact byte accounting, and first-error
+  propagation of the default loop.</li>
+</ul>
+</li>
+<li>[x] Milestone 2.2: Change <code>pump_ranges(...)</code> direct-write execution from
+    one-window calls to bounded batched calls.<ul>
+<li>[x] 2.2.a: Add a bounded op-batch builder keyed by byte limit and op
+  count limit.</li>
+<li>[x] 2.2.b: Keep grant lifetime and target-window validity bounded to one
+  issued batch.</li>
+<li>[x] 2.2.c: Emit explicit direct-write mode and fallback cause observability.</li>
+<li>[x] 2.2.test: Extend
+  <code>core/store/materialization/dataplane/runtime/tests/pump_direct_test.cc</code>
+  to cover single-batch multi-window success, splitting by op count,
+  splitting by byte limit, and pre-issue fallback without partial target
+  corruption.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 2.3: Add typed config plumbing for batch byte and op limits.</p>
+<ul>
+<li>[x] 2.3.a: Add typed config fields for batch byte and op limits.</li>
+<li>[x] 2.3.b: Plumb defaults through the runtime path that owns
+  <code>pump_ranges(...)</code>.</li>
+<li>[x] 2.3.c: Make batch sizing observable in logs or metrics for debugging.</li>
+<li>[x] 2.3.test: Add config-plumbing tests in
+  <code>core/store/runtime/ingestion/materialization_pump_options_test.cc</code>
+  plus direct batching regressions in
+  <code>core/store/materialization/dataplane/runtime/tests/pump_direct_test.cc</code>
+  to verify defaults, explicit overrides, and limit enforcement.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 3: Source Implementations</p>
+</li>
+<li>[x] Milestone 3.1: Teach <code>RemoteKeySource</code> to lower batched direct-write
+    work into one communicator <code>ReadPlan</code> after pre-issue source freeze.<ul>
+<li>[x] 3.1.a: Add explicit pre-issue branch freeze for fallback-bearing
+  remote sources.</li>
+<li>[x] 3.1.b: Lower one batch of <code>DirectWriteOp</code> into
+  <code>SourceSlice</code> plus <code>ReadPlanSlice</code> over <code>memory_keys[]/buffer_sizes[]</code>.</li>
+<li><code>RemoteKeySource::readv_into_at(...)</code> now lowers routed batches into a
+    logical communicator <code>ReadPlan</code> with explicit <code>authority_id</code> and
+    <code>ReadRouteContext</code>.</li>
+<li>If routed <code>read_plan(...)</code> returns an immediate
+    <code>Unimplemented</code>/<code>FailedPrecondition</code> capability miss, the source falls
+    back before issue to the pre-frozen routed per-op execution branch.</li>
+<li>[x] 3.1.c: Return capability miss before issue when routing, protocol,
+  or source-freeze preconditions are not met.</li>
+<li>[x] 3.1.test: Extend
+  <code>core/store/materialization/dataplane/sources/tests/remote_key_source_routing_fallback_test.cc</code>
+  to cover routed success, routing miss before issue, MTCP
+  <code>Unimplemented</code> before issue, and source-freeze gating.</li>
+</ul>
+</li>
+<li>[x] Milestone 3.2: Teach <code>ByteRangeMappedSource</code> to flatten, group, and
+    batch delegate <code>DirectWriteOp</code> work.<ul>
+<li>[x] 3.2.a: Flatten batched direct-write work across contiguous source
+  runs while preserving target offsets.</li>
+<li>[x] 3.2.b: Zero-fill PAD runs directly into the destination grant.</li>
+<li>[x] 3.2.c: Delegate grouped runs to underlying <code>readv_into_at(...)</code>
+  where supported and fall back to per-op <code>read_into_at(...)</code> otherwise.</li>
+<li>[x] 3.2.d: Pre-validate and lower the whole batch before issuing any
+  target writes so deterministic validation errors remain pre-issue.</li>
+<li>[x] 3.2.test: Add a dedicated <code>ByteRangeMappedSource</code> direct-write test
+  suite if needed, or extend existing dataplane source tests, to cover PAD
+  zero-fill, grouped contiguous delegation, mixed-source grouping, and
+  per-op fallback.</li>
+</ul>
+</li>
+<li>[x] Milestone 3.3: Preserve exact staged and per-op fallback when the
+    lower layer does not support batching.<ul>
+<li>[x] 3.3.a: Make pre-issue fallback causes explicit and deterministic.</li>
+<li>[x] 3.3.b: Ensure batch lowering never silently degrades into hidden
+  post-issue fallback.</li>
+<li>[x] 3.3.test: Add regression tests that distinguish
+  capability-miss-before-issue from hard-failure-after-issue.</li>
+</ul>
+</li>
+<li>[x] Milestone 3.4: Reject issue-time in-place fallback for mux or other
+    fallback-bearing sources that could not be frozen before issue.<ul>
+<li>[x] 3.4.a: Make mux capability depend on pre-issue freeze rather than
+  unconditional branch probing.</li>
+<li>[x] 3.4.b: Preserve existing staged <code>read_at(...)</code> fallback behavior
+  outside the vectored direct-write path.</li>
+<li>[x] 3.4.test: Extend
+  <code>core/store/materialization/dataplane/sources/tests/mux_seekable_source_test.cc</code>
+  to cover pre-issue freeze success, capability miss when freeze is
+  impossible, and explicit rejection of issue-time branch switching.</li>
+</ul>
+</li>
+</ul>
+<p>Phase 3 note:</p>
+<ul>
+<li>The shared dataplane now distinguishes coarse scalar direct-write capability
+  from safe batched capability via <code>supports_batched_direct_write_at()</code>. Only
+  sources that advertise the latter may return <code>Unimplemented</code> or
+  <code>FailedPrecondition</code> from <code>readv_into_at(...)</code> as a pre-issue capability
+  miss that callers may fall back from.</li>
+<li>
+<p>Batched-capable sources now follow two-phase semantics:
+  <code>pre-validate/lower -&gt; issue</code>. Deterministic validation failures must happen
+  before any target mutation; partial target mutation is reserved for
+  post-issue execution failures only.</p>
+</li>
+<li>
+<p>[x] Phase 4: Routed Communicator Read Plan</p>
+</li>
+<li>[x] Milestone 4.1: Add routed communicator <code>ReadPlan</code> API types and
+    <code>read_plan(...)</code>.<ul>
+<li>[x] 4.1.a: Add logical <code>ReadPlan</code> types in the routing seam.</li>
+<li>Landed in <code>core/communicator/routing/types.h</code> as <code>ReadRouteContext</code>,
+    <code>LocalRegion</code>, <code>SourceSlice</code>, <code>ReadPlanSlice</code>, and <code>ReadPlan</code>.</li>
+<li><code>SourceSlice</code> currently carries explicit <code>authority_id</code> and
+    <code>ReadRouteContext</code> so one-authority / one-route-context validation is
+    explicit before issue.</li>
+<li>[x] 4.1.b: Add entrypoints in routing, route-channel, adapter, and
+  engine layers without changing public SDK APIs.</li>
+<li><code>read_plan(...)</code> now threads through <code>RoutingContext::Communicator</code>,
+    <code>RouteChannel</code>, <code>Connection</code>, <code>ConnectionAdapter</code>, and
+    <code>engine::Communicator</code>.</li>
+<li>Current engine / local-adapter realization is still an additive stub:
+    unsupported paths return an immediate pre-issue capability miss rather
+    than hiding many-single-read emulation inside communicator.</li>
+<li>[x] 4.1.c: Keep <code>read_tensor(...)</code> intact as the legacy path.</li>
+<li>Legacy routed <code>read_tensor(...)</code> remains unchanged and is still used by
+    <code>RemoteKeySource</code> as the explicit pre-issue fallback branch.</li>
+<li>[x] 4.1.test: Extend
+  <code>core/communicator/routing/routing_context_test.cc</code> or add a dedicated
+  <code>read_plan</code> validation suite for route construction, protocol selection,
+  and request-shape validation.</li>
+<li>Added dedicated <code>core/communicator/routing/read_plan_validation_test.cc</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.2: Add engine-side request-scoped local region management,
+    <code>PreparedReadPlan</code>, progress, and profiling for plan execution.<ul>
+<li>[x] 4.2.a: Introduce <code>PreparedReadPlan</code> as the request-scoped prepared
+  object replacing the single-region ownership model of <code>PartitionTensor</code>
+  for this path.</li>
+<li>Landed in <code>core/communicator/transport/request.h</code> as
+    <code>PreparedReadPlan</code>, <code>PreparedLocalRegion</code>, and
+    <code>PreparedSourcePlacement</code>, with additive <code>ReadRequest</code> construction for
+    request-scoped routed plans.</li>
+<li>[x] 4.2.b: Implement CPU-only local-region registration and cleanup for
+  the first cut.</li>
+<li><code>engine::Communicator::read_plan(...)</code> now registers each accepted CPU
+    <code>LocalRegion</code> as a request-scoped <code>PartitionTensor</code>, enforces one local
+    NIC / rail for the first cut, and relies on prepared-plan / request
+    teardown for cleanup.</li>
+<li>Local-region preparation still enforces one selected local NIC / rail
+    in the first cut, but source-slice placement is no longer restricted to
+    one full-slice placement.</li>
+<li>[x] 4.2.c: Propagate progress and profiling fields through the prepared
+  request lifecycle.</li>
+<li><code>ReadRequest</code> now carries explicit <code>total_bytes</code>, plan-mode progress,
+    segment-count ACK windows, and additive RDMA profiling counters for
+    routed plan requests.</li>
+<li>[x] 4.2.test: Extend <code>core/communicator/transport/request_test.cc</code> and
+  <code>core/communicator/engine/cpu_ce_test.cc</code> or adjacent engine tests to
+  cover request-scoped cleanup, progress aggregation, and CPU-only region
+  validation.</li>
+<li>Covered by <code>core/communicator/transport/request_test.cc</code>,
+    including explicit request-lifetime ownership / cleanup coverage for
+    prepared local regions,
+    <code>core/communicator/routing/read_plan_validation_test.cc</code>, and
+    adjacent RDMA engine tests rather than <code>cpu_ce_test.cc</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.3: Add additive wire ops for plan request, plan response,
+    and plan ACK.<ul>
+<li>[x] 4.3.a: Add additive protocol structs and engine dispatch.</li>
+<li>Added <code>ENGINE_OP_READ_PLAN_REQUEST</code>,
+    <code>ENGINE_OP_READ_PLAN_RESPONSE_EX</code>, <code>ENGINE_OP_READ_PLAN_FAILED</code>, and
+    <code>ENGINE_OP_RDMA_READ_PLAN_DONE_EX</code> plus additive <code>ProtoReadPlan*</code>
+    payloads.</li>
+<li>[x] 4.3.b: Keep the current read-response wire path intact for legacy
+  callers.</li>
+<li>Legacy <code>read_tensor(...)</code> request / response / ACK flow remains intact.</li>
+<li>[x] 4.3.c: Ensure plan ACK paths can coexist with existing staged-window
+  bookkeeping.</li>
+<li><code>ReadRequest</code> now supports both offset-based ACK windows and
+    segment-count plan ACK windows inside the same request machinery.</li>
+<li>[x] 4.3.test: Extend
+  <code>core/communicator/engine/rdma_engine_test.cc</code> to cover plan request
+  decode, plan response encode/decode, and additive ACK flow.</li>
+<li><code>rdma_engine_test.cc</code> now covers missing-plan failures,
+    <code>READ_PLAN_FAILED</code> resolution by request id, and
+    <code>READ_PLAN_RESPONSE_EX</code> decode / ACK queueing.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.4: Keep one-plan-one-authority, one-route-context, and
+    non-overlapping-destination invariants explicit and validated.<ul>
+<li>[x] 4.4.a: Reject mixed-authority plans before issue.</li>
+<li>[x] 4.4.b: Reject mixed route-context or mixed rail-domain plans before
+  issue.</li>
+<li>[x] 4.4.c: Reject overlapping destination spans before issue.</li>
+<li>[x] 4.4.test: Add negative validation tests for mixed authority, mixed
+  route context, and overlapping spans.</li>
+<li>Central pre-issue validation now lives in
+    <code>core/communicator/routing/types.cc::validate_read_plan(...)</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 4.5: Keep the <code>LocalRegion</code> interface extensible while the
+    first cut implements CPU-only regions.<ul>
+<li>[x] 4.5.a: Preserve <code>dev_type</code> and <code>dev_id</code> in logical plan types.</li>
+<li>[x] 4.5.b: Implement explicit first-cut rejection of non-CPU regions.</li>
+<li>[x] 4.5.test: Add validation tests that CPU regions pass while GPU or
+  mixed-region plans fail with pre-issue capability or validation errors.</li>
+</ul>
+</li>
+</ul>
+<p>Execution closure:</p>
+<ul>
+<li>The generic capability owned by <code>0115</code> is now landed end-to-end in core,
+  communicator, transport, and shared-runtime code.</li>
+<li>
+<p>Follow-on byte-artifact source-side no-pack export remains owned by
+  <code>0087-01</code>; it consumes this generic capability rather than extending it.</p>
+</li>
+<li>
+<p>[x] Phase 5: RDMA Realization</p>
+</li>
+<li>[x] Milestone 5.1: Generalize the RDMA segment shape to support per-segment
+    local <code>lkey</code>.<ul>
+<li>[x] 5.1.a: Introduce the per-segment local registration shape used by the
+  transport boundary.</li>
+<li>Landed early as a Phase 4 prerequisite by extending
+    <code>transport::RdmaTransport::RdmaReadSeg</code> with additive <code>local_lkey</code>.</li>
+<li>[x] 5.1.b: Keep request-level completion and profiling aggregation stable
+  while segment-local <code>lkey</code> varies.</li>
+<li>Existing request-level completion, progress, and profiling remain
+    aggregated in <code>ReadRequest</code>; transport now consumes per-segment lkeys
+    without changing request ownership.</li>
+<li>[x] 5.1.test: Extend <code>core/communicator/engine/rdma_engine_test.cc</code> to
+  cover at least two local registrations within one logical request.</li>
+</ul>
+</li>
+<li>[x] Milestone 5.2: Post vectored WR chains for one request across a local
+    region set.<ul>
+<li>[x] 5.2.a: Build WR chains over resolved local region entries rather than
+  one request-global MR.</li>
+<li><code>ReadPlanSlice</code> now carries <code>source_slice_offset</code>, prepared placement
+    coverage is validated exactly per source slice, and
+    <code>BuildPreparedPlanRdmaSegments(...)</code> can split one response segment
+    into multiple RDMA WRs across prepared local regions.</li>
+<li>[x] 5.2.b: Preserve multi-QP posting and completion ordering assumptions.</li>
+<li><code>rdma_engine_test.cc</code> now exercises a two-QP request and verifies the
+    request's WRs are distributed across per-QP inflight queues without
+    regressing request-level completion accounting.</li>
+<li>[x] 5.2.c: Define failure behavior for partial post before request
+  completion.</li>
+<li><code>RdmaTransport::read_multi(...)</code> now carries an explicit hard-failure
+    rule for partial post: already-posted WRs remain inflight locally, the
+    request becomes terminally failed, and no unposted WRs are counted.</li>
+<li>[x] 5.2.test: Add RDMA engine regressions for multi-WR posting across
+  multiple local regions, including partial-post failure handling.</li>
+</ul>
+</li>
+<li>[x] Milestone 5.3: Keep ACK, flow-credit, and staged-window release rules
+    correct under the new request shape.<ul>
+<li>[x] 5.3.a: Ensure staged windows remain releasable when a prepared plan
+  produces multiple segments or windows.</li>
+<li>Added controller and engine regressions for multi-window staged
+    release; <code>RDMA_READ_PLAN_DONE_EX</code> now has explicit coverage showing one
+    acknowledged window releases only its staged segments while other
+    windows remain inflight.</li>
+<li>[x] 5.3.b: Keep flow-credit ledger behavior invariant under the new
+  request shape.</li>
+<li><code>staging_flow_controller_test.cc</code> and <code>rdma_engine_test.cc</code> now assert
+    staged credit returns exactly per released lease or window, preserving
+    request-shape invariants under multi-window prepared plans.</li>
+<li>[x] 5.3.test: Extend
+  <code>core/communicator/engine/staging_flow_controller_test.cc</code> and
+  <code>core/communicator/engine/rdma_engine_test.cc</code> for multi-window staged
+  release and credit restoration.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 5.4: Preserve request-local ACK identity keyed by
+    <code>window_seq + segment_idx</code> rather than semantic slice identity.</p>
+<ul>
+<li>[x] 5.4.a: Keep slice metadata available for placement and debugging only.</li>
+<li>Added regressions where different staged windows intentionally reuse
+    the same semantic slice-offset metadata while ACK release still follows
+    request-local window identity only.</li>
+<li>[x] 5.4.b: Ensure staged lease registry and ACK release remain keyed by
+  request-local window and segment identity.</li>
+<li><code>StageLeaseKey</code> remains <code>{request_key, window_seq, segment_idx}</code> and
+    ACK handlers are now covered by tests that release one window while an
+    identically shaped sibling window remains staged.</li>
+<li>[x] 5.4.test: Add regressions that reuse the same source slice identity
+  across different windows while verifying the correct lease is released by
+  <code>window_seq + segment_idx</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 6: Shared Runtime Integration</p>
+</li>
+<li>[x] Milestone 6.1: Add an internal
+    <code>materialize_mapped_sources_into_target(...)</code> helper in
+    <code>MaterializationFacade</code>.<ul>
+<li>[x] 6.1.a: Add one internal multi-source helper while preserving existing
+  public entrypoints as wrappers.</li>
+<li>Landed as private <code>MaterializationFacade::materialize_mapped_sources_into_target(...)</code>,
+    which owns the shared <code>ByteRangeMappedSource -&gt; sink -&gt; pump_ranges(...)</code>
+    execution for CPU/GPU target layouts over <code>std::vector&lt;SeekableSource&gt;</code>.</li>
+<li>[x] 6.1.b: Route existing single-source paths through the helper where it
+  is safe to do so.</li>
+<li><code>materialize_mapped_loader_into_target(...)</code> now acts as a single-source
+    wrapper that opens one source and delegates execution to the shared
+    helper.</li>
+<li>[x] 6.1.test: Extend
+  <code>core/store/runtime/ingestion/materialization_facade_test.cc</code> to cover
+  composite execution over multiple sources into one target.</li>
+<li>Added a private-helper regression for composite CPU sources into one
+    target plus a wrapper regression that verifies the mapped-loader path
+    now resolves through the shared helper.</li>
+</ul>
+</li>
+<li>[x] Milestone 6.2: Remove internal single-source restrictions that block
+    composite execution.<ul>
+<li>[x] 6.2.a: Audit <code>mapping.num_sources == 1</code> restrictions and classify
+  them into removable, wrapper-only, and still-semantic.</li>
+<li>Removed the global single-source finalization guard in
+    <code>derive_effective_source_maps(...)</code> so lowering can carry composite
+    <code>ByteRangeMap</code> state forward.</li>
+<li>Removed the early <code>mapping.num_sources == 1</code> rejection in
+    <code>materialize_mapped_into_target(...)</code> so failures surface at actual
+    source binding time instead of at facade entry.</li>
+<li>Kept <code>materialize_mapped_loader_into_target(...)</code> and
+    <code>ingest_mapped_loader_into_replica(...)</code> as explicit single-source
+    wrappers because <code>IArtifactLoader</code> still resolves one source today.</li>
+<li>Kept the scalar typed-local path restrictions that remain semantic for
+    non-facade work items in this phase.</li>
+<li>[x] 6.2.b: Remove only the restrictions that block internal composite
+  execution for this design.</li>
+<li><code>materialize_mapped_into_target(...)</code> now reports a precise
+    <code>FailedPrecondition</code> when execution maps require more sources than the
+    current source resolver wires, instead of reporting a legacy
+    single-source contract violation.</li>
+<li>[x] 6.2.test: Add regression tests for multi-source <code>ByteRangeMap</code>
+  lowering where the legacy public API shape remains unchanged.</li>
+<li>Added a mapped-target regression that proves composite lowering now
+    reaches the source-binding stage and fails with a source-resolution gap
+    when only one concrete source is available.</li>
+<li>Preserved wrapper-level regression coverage so the public mapped-loader
+    API still rejects <code>mapping.num_sources != 1</code>.</li>
+</ul>
+</li>
+<li>
+<p>[x] Milestone 6.3: Keep public materialization APIs unchanged.</p>
+<ul>
+<li>[x] 6.3.a: Confirm no public request or daemon API shape changes are
+  needed.</li>
+<li><code>MaterializationFacade</code> public method signatures remain unchanged.</li>
+<li>The new composite mapped-source helper stays private-only; no request
+    schema, daemon RPC, or external facade contract now accepts a
+    multi-source payload directly.</li>
+<li>[x] 6.3.b: Keep compatibility wrappers explicit rather than relying on
+  accidental call-site behavior.</li>
+<li><code>materialize_mapped_loader_into_target(...)</code> stays as the public
+    single-loader wrapper that performs loader-specific validation before
+    delegating into the internal composite helper.</li>
+<li><code>ingest_mapped_loader_into_replica(...)</code> keeps the public
+    logical/physical artifact-id split plus the single-loader contract
+    instead of collapsing into the internal helper shape.</li>
+<li>[x] 6.3.test: Keep existing public-facing facade tests green and add a
+  compatibility regression if wrapper behavior changes.</li>
+<li>Added regressions for <code>ingest_mapped_loader_into_replica(...)</code> that
+    verify logical-vs-physical artifact semantics remain intact on the
+    public path and that <code>mapping.num_sources != 1</code> is still rejected.</li>
+</ul>
+</li>
+<li>
+<p>[x] Phase 7: Validation and Dependent Consumers</p>
+</li>
+<li>[x] Milestone 7.1: Add unit tests for batched direct-write behavior,
+    fallback, and failure semantics.<ul>
+<li>[x] 7.1.a: Collect the minimum direct-write regression matrix spanning
+  source contract, pump batching, mux freeze, and facade integration.</li>
+<li><code>pump_direct_test</code> now covers the shared <code>DirectWriteOp</code> contract,
+    default <code>readv_into_at(...)</code> loop behavior, batch splitting, staged
+    fallback on pre-issue plan failure, and post-issue hard-fail surfacing.</li>
+<li><code>target_layout_host_sink_test</code> covers multi-window host direct-write
+    grant planning across split target storages.</li>
+<li><code>byte_range_mapped_source_direct_test</code> covers grouped direct write,
+    PAD zero-fill, scalar-child fallback, pre-validation, pre-issue
+    vectored fallback, and hard vectored failure propagation.</li>
+<li><code>remote_key_source_routing_fallback_test</code> covers routed lowering,
+    capability miss without RDMA, route freeze failure before issue, and
+    logical <code>ReadPlan</code> lowering that falls back before issue.</li>
+<li><code>mux_seekable_source_test</code> covers branch freeze on direct write,
+    capability miss, and explicit rejection of issue-time branch switching.</li>
+<li><code>materialization_facade_test</code> now covers public mapped-loader facade
+    integration for batched direct writes and pre-issue vectored fallback.</li>
+<li><code>materialization_pump_options_test</code> covers runtime option wiring for
+    batch bytes / op-count limits.</li>
+<li>[x] 7.1.b: Require each lower-layer milestone to land its blocking unit
+  tests before the next phase depends on it.</li>
+<li>The current blocking matrix is green under Bazel for:
+    <code>pump_direct_test</code>,
+    <code>byte_range_mapped_source_direct_test</code>,
+    <code>remote_key_source_routing_fallback_test</code>,
+    <code>mux_seekable_source_test</code>,
+    <code>target_layout_host_sink_test</code>,
+    <code>materialization_pump_options_test</code>,
+    and <code>materialization_facade_test</code>.</li>
+</ul>
+</li>
+<li>[x] Milestone 7.2: Add communicator tests for routed <code>read_plan(...)</code>,
+    MTCP fallback, and RDMA multi-lkey posting.<ul>
+<li>[x] 7.2.a: Keep communicator correctness gates green for both RDMA and
+  first-cut MTCP fallback.</li>
+<li><code>read_plan_validation_test</code> covers one-authority / one-route-context
+    invariants, local-region shape validation, CPU-only first-cut region
+    support, and exact source-slice coverage rules.</li>
+<li><code>routing_context_test</code> covers communicator-side adapter selection and
+    route mismatch rejection before issue.</li>
+<li><code>adapter_test</code> now pins both first-cut capability misses:
+    <code>read_plan(...)</code> on a non-RDMA communicator and routed MTCP
+    <code>read_plan(...)</code> on an RDMA-enabled communicator both fail before
+    issue with explicit <code>Unimplemented</code>.</li>
+<li><code>request_test</code> continues to cover read-plan request identity,
+    segment-count ACK bookkeeping, and prepared-region lifetime retention.</li>
+<li>[x] 7.2.b: Cover both direct and staged RDMA release behavior.</li>
+<li><code>rdma_engine_test</code> already covers prepared-plan request-key routing,
+    per-segment local lkey preservation across multiple local regions,
+    prepared-placement splitting, multi-QP vectored posting, partial post
+    failure bookkeeping, and staged <code>RDMA_READ_PLAN_DONE_EX</code> release keyed
+    by request-local <code>window_seq/segment_idx</code>.</li>
+<li><code>rdma_engine_test</code> now also covers the direct path explicitly:
+    zero-copy <code>READ_PLAN_RESPONSE_EX</code> windows do not enqueue staged ACK
+    state on the sink, and <code>RDMA_READ_PLAN_DONE_EX</code> for a zero-copy window
+    is a no-op with respect to staged lease release.</li>
+</ul>
+</li>
+<li>[x] Milestone 7.3: Demonstrate that <code>0087-01</code> can consume this capability
+    without defining a byte-artifact-private RDMA batch API.<ul>
+<li>[x] 7.3.a: Add a consumer-side contract checklist showing which generic
+  primitives byte-artifact is allowed to call.</li>
+<li>The byte-artifact consumer is now constrained to the generic
+    <code>0115</code> seams:
+    <code>ByteRangeMappedSource</code>,
+    <code>DirectWriteOp</code>,
+    <code>SeekableSource::readv_into_at(...)</code>,
+    <code>RemoteKeySource</code>,
+    routed communicator <code>read_plan(...)</code>,
+    and the shared <code>MaterializationFacade</code> execution path above them.</li>
+<li>No byte-artifact-private communicator or RDMA batch API was added in
+    this cut.</li>
+<li>[x] 7.3.b: If a targeted consumer test is added later, make it assert
+  generic contract use rather than benchmark parity.</li>
+<li>The current consumer evidence is integration-level:
+    routed share-remote RDMA reruns on <code>20260420-155026</code>,
+    <code>20260420-161513</code>, and <code>20260420-161949</code> all show cached-token reuse
+    together with daemon logs
+    <code>materialize_mode=single_source_composite batched_direct_write=true</code>.</li>
+<li>Any future targeted consumer test must assert those generic contract
+    surfaces and mode signals rather than TTFT parity alone.</li>
+</ul>
+</li>
+</ul>
+<h1 id="tasks">Tasks<a class="headerlink" href="#tasks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Define and land the shared dataplane contract.</li>
+<li>Add <code>DirectWriteOp</code>.</li>
+<li>Add default <code>readv_into_at(...)</code>.</li>
+<li>Keep <code>supports_direct_write_at()</code> as a coarse hint only.</li>
+<li>
+<p>Update direct-write tests to cover multiple destination windows.</p>
+</li>
+<li>
+<p>[x] Rework <code>pump_ranges(...)</code>.</p>
+</li>
+<li>Build bounded op batches instead of single-window calls.</li>
+<li>Keep staged fallback before issue.</li>
+<li>Add explicit pre-issue source-freeze hooks for fallback-bearing sources.</li>
+<li>
+<p>Surface explicit mode and fallback metrics.</p>
+</li>
+<li>
+<p>[x] Implement source batching.</p>
+</li>
+<li><code>RemoteKeySource</code> batches by remote key and grant window.</li>
+<li><code>RemoteKeySource</code> lowers only pre-issue-frozen branches into <code>ReadPlan</code>.</li>
+<li><code>ByteRangeMappedSource</code> batches by underlying source and PAD policy.</li>
+<li>
+<p>Fallback-bearing mux paths return capability miss before issue when freeze
+    cannot be completed.</p>
+</li>
+<li>
+<p>[x] Implement communicator <code>ReadPlan</code>.</p>
+</li>
+<li>Add routing types and engine entrypoint.</li>
+<li>Add request-scoped <code>PreparedReadPlan</code> and destination region registration.</li>
+<li>Keep one-plan-one-endpoint invariant.</li>
+<li>Keep one-plan-one-authority / one-route-context invariant.</li>
+<li>Reject overlapping destination spans before issue.</li>
+<li>
+<p>Keep first cut CPU-only while preserving extensible <code>LocalRegion</code> API.</p>
+</li>
+<li>
+<p>[x] Implement RDMA transport realization.</p>
+</li>
+<li>Support per-WR <code>lkey</code>.</li>
+<li>Preserve request-level completion aggregation.</li>
+<li>
+<p>Preserve request-local stage lease and ACK identity safety.</p>
+</li>
+<li>
+<p>[x] Integrate with shared runtime.</p>
+</li>
+<li>Add internal multi-source helper.</li>
+<li>Remove internal <code>num_sources == 1</code> blockers where safe.</li>
+<li>
+<p>Keep public API unchanged.</p>
+</li>
+<li>
+<p>[x] Validate consumer fit.</p>
+</li>
+<li>Do not add byte-artifact-only communicator APIs.</li>
+</ul>
+<h1 id="suggested-test-placement">Suggested Test Placement<a class="headerlink" href="#suggested-test-placement" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] <code>core/store/materialization/dataplane/runtime/tests/pump_direct_test.cc</code>
+  owns batching, split-by-limit, pre-issue fallback, and post-issue hard-fail
+  regressions for the shared dataplane direct-write path.</li>
+<li>[x] <code>core/store/materialization/dataplane/sources/tests/remote_key_source_routing_fallback_test.cc</code>
+  owns routed lowering success, routing miss, MTCP capability miss, and
+  source-freeze gating for <code>RemoteKeySource</code>.</li>
+<li>[x] <code>core/store/materialization/dataplane/sources/tests/mux_seekable_source_test.cc</code>
+  owns mux-specific pre-issue freeze and rejection of issue-time branch
+  switching.</li>
+<li>[x] <code>core/store/materialization/dataplane/sources/tests/byte_range_mapped_source_direct_test.cc</code>
+  owns PAD zero-fill, grouped delegation, pre-validation, pre-issue vectored
+  fallback, and post-issue hard-failure regressions for composite mapped
+  direct-write sources.</li>
+<li>[x] <code>core/store/runtime/ingestion/materialization_pump_options_test.cc</code>
+  owns typed runtime option wiring for direct-write batch byte and op-count
+  limits.</li>
+<li>[x] <code>core/communicator/routing/routing_context_test.cc</code> plus
+  <code>core/communicator/routing/read_plan_validation_test.cc</code> own route-context,
+  authority, exact source-slice coverage, and CPU-only local-region
+  validation.</li>
+<li>[x] <code>core/communicator/transport/request_test.cc</code> owns request-scoped
+  progress, completion, and prepared-request accounting regressions.</li>
+<li>[x] <code>core/communicator/engine/rdma_engine_test.cc</code> owns additive wire-path,
+  multi-lkey RDMA posting, staged ACK release, and mixed multi-window RDMA
+  regressions.</li>
+<li>[x] <code>core/communicator/engine/staging_flow_controller_test.cc</code> owns
+  request-local lease identity and staged-credit restoration invariants.</li>
+<li>[x] <code>core/store/runtime/ingestion/materialization_facade_test.cc</code> owns
+  internal multi-source helper coverage and wrapper compatibility regressions.</li>
+</ul>
+<h1 id="test-rollout-backout">Test / Rollout / Backout<a class="headerlink" href="#test-rollout-backout" title="Permanent link">&para;</a></h1>
+<h2 id="acceptance-checks">Acceptance checks<a class="headerlink" href="#acceptance-checks" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Shared dataplane can batch direct-write work without controller-local
+  loops.</li>
+<li>[x] <code>RemoteKeySource</code> can issue one routed plan for multiple direct-write
+  ops after pre-issue source freeze.</li>
+<li>[x] communicator can execute one <code>ReadPlan</code> across multiple source slices and
+  local regions within one authority / route context.</li>
+<li>[x] RDMA can post many WRs with per-segment local registrations.</li>
+<li>[x] The first cut accepts CPU <code>local_regions</code> only, while the interface
+  remains extensible to GPU or mixed regions later.</li>
+<li>[x] Pre-issue fallback works and post-issue in-place fallback never happens.</li>
+<li>[x] Request-local ACK and staged lease release remain keyed by
+  <code>window_seq + segment_idx</code>.</li>
+<li>[x] MTCP keeps existing staged behavior when the plan fast path is
+  unavailable by returning a pre-issue capability miss in the first cut.</li>
+</ul>
+<h2 id="test-plan">Test plan<a class="headerlink" href="#test-plan" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Dataplane direct-write tests:</li>
+<li>batched multi-window success</li>
+<li>default <code>readv_into_at(...)</code> zero-op no-op</li>
+<li>default <code>readv_into_at(...)</code> first-error propagation</li>
+<li>split by op-count limit</li>
+<li>split by byte-limit</li>
+<li>pre-issue source freeze for fallback-bearing sources</li>
+<li>pre-issue fallback</li>
+<li>post-issue failure surfaces hard error</li>
+<li>[x] <code>RemoteKeySource</code> tests:</li>
+<li>routed plan success</li>
+<li>routing failure fallback before issue</li>
+<li>fallback-bearing source capability miss before issue</li>
+<li>MTCP <code>Unimplemented</code> fallback</li>
+<li>multi-key lowering into one logical <code>ReadPlan</code></li>
+<li>[x] communicator tests:</li>
+<li><code>read_plan(...)</code> routing and connection selection</li>
+<li>one-authority / one-route-context validation</li>
+<li>CPU-only <code>LocalRegion</code> validation</li>
+<li>overlapping destination rejection</li>
+<li>RDMA response segmentation and ACK release</li>
+<li>per-segment <code>lkey</code> posting</li>
+<li>partial WR-post failure handling</li>
+<li>[x] shared runtime tests:</li>
+<li>internal multi-source helper</li>
+<li>exact fallback coverage with <code>ByteRangeMap</code></li>
+<li>removal of internal <code>num_sources == 1</code> blockers where intended</li>
+</ul>
+<h2 id="per-milestone-test-gates">Per-milestone test gates<a class="headerlink" href="#per-milestone-test-gates" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Phase 2 may not complete until the shared dataplane direct-write tests
+  cover default batching semantics and split-by-limit behavior.</li>
+<li>[x] Phase 3 may not complete until <code>RemoteKeySource</code>, mux freeze, and
+  <code>ByteRangeMappedSource</code> fallback tests all distinguish pre-issue capability
+  miss from post-issue hard failure.</li>
+<li>[x] Phase 4 may not complete until <code>ReadPlan</code> validation rejects mixed
+  authority, mixed route context, non-CPU first-cut regions, and overlapping
+  destination spans.</li>
+<li>[x] Phase 5 may not complete until RDMA tests cover multi-lkey posting and
+  staged ACK release keyed by <code>window_seq + segment_idx</code>.</li>
+<li>[x] Phase 6 may not complete until materialization facade tests cover
+  multi-source internal execution without public API changes.</li>
+</ul>
+<h2 id="rollout">Rollout<a class="headerlink" href="#rollout" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Land the contract and fallback rules before consumer integration.</li>
+<li>Keep plan fast path behind typed config until correctness and metrics are in
+  place.</li>
+<li>Enable RDMA first.</li>
+<li>Keep MTCP on the current staged path until explicit evidence justifies a
+  native plan implementation under the same contract.</li>
+</ul>
+<h2 id="backout">Backout<a class="headerlink" href="#backout" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Disable <code>read_plan(...)</code> use and fall back to existing single-read or staged
+  paths.</li>
+<li>Keep <code>readv_into_at(...)</code> defaulting to per-op loops so the contract can
+  remain while the optimization is turned off.</li>
+<li>Do not back out by restoring byte-artifact-specific copy loops as the owner of
+  the optimization.</li>
+</ul>
+<h1 id="risks-tracking">Risks &amp; Tracking<a class="headerlink" href="#risks-tracking" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[ ] Request-scoped destination registration may become a measurable setup
+  cost.</li>
+<li>[ ] RDMA wire and ACK changes may regress staged-credit correctness if not
+  covered by dedicated tests.</li>
+<li>[ ] Capability-hint misuse could accidentally cache route-dependent fast-path
+  eligibility too early; review pre-issue freeze semantics carefully.</li>
+<li>[ ] Multi-source helper changes may accidentally widen public API or collapse
+  <code>ByteRangeMap</code> fallback semantics if ownership boundaries blur.
+  reject those changes and route them back through <code>0115</code>.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

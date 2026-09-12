@@ -1,0 +1,2804 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/plans/0103-framework-owned-ephemeral-artifact-replica-prework/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Framework-Owned Ephemeral Artifact Replica Prerequisite Plan - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#objective" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Framework-Owned Ephemeral Artifact Replica Prerequisite Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="objective">Objective<a class="headerlink" href="#objective" title="Permanent link">&para;</a></h1>
+<p>Close the TensorCast prerequisites required before implementing the
+vllm framework-owned ephemeral artifact replica plan at:</p>
+<p><code>/opt/vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md</code></p>
+<p>This is a TensorCast prework plan only. It does not implement the vLLM
+producer/consumer integration. The handoff criterion is that TensorCast can
+safely publish an already artifact-backed daemon-owned binding current value as
+a routable ephemeral artifact replica, and can fail closed on stale tokens,
+retire, owner exit, and direct RPC bypass attempts.</p>
+<h1 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h1>
+<p>Implemented in TensorCast on 2026-05-16. The cutover introduces
+<code>BindingCurrentValuePublicationScope</code> and
+<code>binding_current_value_publication_token</code>, removes standalone publish authority
+from target materialization responses, binds publish validation to the current
+<code>BindingRegistry</code> generation, terminalizes publication state on retire and
+owner-exit lifecycle cleanup, and adds daemon-side mutation guards for active
+published current values. Optional Global Store expiry diagnostics in Phase 6
+remain intentionally deferred because expiry is not the safety boundary.</p>
+<p>The required semantic boundary is:</p>
+<ul>
+<li><code>local_serving_ref</code> remains local-only recovery metadata.</li>
+<li>local-only values must first become artifact-backed current values through
+  promotion or serving closeout.</li>
+<li><code>publish_replica()</code> publishes only an artifact-backed current value.</li>
+<li>The only token that can authorize <code>PublishTargetReplica</code> is a
+  <code>BindingCurrentValuePublicationToken</code>. It proves one concrete daemon-owned
+  binding current value generation is still current, artifact-backed, owner
+  alive, unretired, and layout/device/selection compatible.</li>
+<li><code>retire()</code> and owner exit terminalize both discovery and publication
+  capability.</li>
+</ul>
+<h1 id="current-state-and-grounding">Current State And Grounding<a class="headerlink" href="#current-state-and-grounding" title="Permanent link">&para;</a></h1>
+<p>Reviewed baseline: current <code>tensorcast-280</code> code as of 2026-05-16.</p>
+<h2 id="existing-foundations">Existing Foundations<a class="headerlink" href="#existing-foundations" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Daemon-owned bindings already track <code>binding_id</code>, <code>binding_layout_id</code>,
+  <code>current_binding_value_id</code>, <code>seal_generation</code>, owner pid, target layout hash,
+  device UUID, current selection, and
+  <code>binding_current_value_publication_token</code> in
+  <code>BindingRegistry::Record</code>.</li>
+<li><code>AcquireBindingValue</code> exists for same-daemon local acquire and validates
+  local peer, expected device/member/layout/schema/build metadata, retained
+  status, and caller pid in
+  <code>daemon/service/controllers/materialization_controller.cc</code>.</li>
+<li><code>MaterializeIntoTarget</code> and <code>MaterializeIntoMappedTarget</code> no longer mint
+  publication authority or insert standalone publication records; binding
+  current-value commit/promote paths own that authority.</li>
+<li><code>PublishTargetReplica</code> validates capability-token signature/audience/issuer,
+  token scope against request, token scope against
+  <code>TargetPublicationRegistry::Record</code>, commits LIP routable exports, and
+  registers a memory replica in Global Store.</li>
+<li><code>RetirePublishedReplica</code> already marks the GS replica unavailable, waits for
+  drain when requested, and revokes the LIP export.</li>
+<li>Global Store source selection already filters worker presence, worker
+  heartbeat freshness, availability, capacity, and exportable transport
+  metadata.</li>
+</ul>
+<h2 id="blocking-gaps">Blocking Gaps<a class="headerlink" href="#blocking-gaps" title="Permanent link">&para;</a></h2>
+<p>These gaps must be closed before the vllm plan starts using the
+feature.</p>
+<ol>
+<li>
+<p>Local acquire has a snapshot race.
+   The local-ref branch validates under the binding record lock, then mints a
+   lease, then refreshes the binding record and fills the response from the
+   refreshed record. A current-value swap between validation and response fill
+   can return a different value than the one validated.</p>
+</li>
+<li>
+<p>Promotion and serving closeout do not return publishable tokens.
+   <code>PromoteBindingCurrentValueResponse</code> and <code>BindingPromotionStatus</code> do not
+   carry a <code>BindingCurrentValuePublicationToken</code>.
+   <code>promote_binding_current_value_impl()</code> clears the record token on success.
+   Representation closeout also clears the token after committing the
+   artifact-backed current value.</p>
+</li>
+<li>
+<p>Publication authority is split between target materialization and binding
+   currentness.
+   Current materialize-into-target token minting lets a filled target buffer
+   become publishable without proving it is still the current value of a
+   daemon-owned binding. The vllm plan needs the opposite boundary:
+   publication starts from binding lifecycle currentness, not from the
+   materialization pipeline.</p>
+</li>
+<li>
+<p>Retired target publication tokens were not binding-generation fenced.
+   <code>TargetPublicationScope</code> included publication, selection, byte-space, device
+   UUID, owner pid, layout hash, and operation id, but not <code>binding_id</code>,
+   <code>binding_layout_id</code>, <code>binding_value_id</code>, or <code>seal_generation</code>.
+   <code>BindingCurrentValuePublicationScope</code> is now the only generated publication
+   credential scope, so <code>PublishTargetReplica</code> proves that the token is still
+   for the current binding value.</p>
+</li>
+<li>
+<p>Published current values are not daemon-guarded against mutation.
+   Python SDK guards reject mutation while <code>_published_lease_id</code> is set, but
+   daemon RPCs such as <code>BeginBindingUpdate</code> do not check whether the current
+   value has an active published replica. Direct RPC callers can bypass SDK
+   state.</p>
+</li>
+<li>
+<p>Retire and owner-exit cleanup are not capability-terminal.
+   <code>RetirePublishedReplica</code> drains and revokes LIP/GS state, but it does not
+   erase the target publication record or release the lifecycle publish
+   capability. Owner-pid cleanup removes bindings, external handle leases, and
+   LIP exports, but it does not terminalize <code>TargetPublicationRegistry</code> or the
+   publication capability.</p>
+</li>
+<li>
+<p>Global Store is not a correctness boundary for ephemeral lifetime.
+   <code>MemoryInfo.source_process_id</code> is populated by the C++ client but is not a
+   durable source-selection fence. <code>artifact_replicas.expires_at</code> exists, but
+   ordinary source selection does not filter candidates by expiry. MVP safety
+   must rely on explicit daemon unregister, LIP revoke, lifecycle capability
+   terminalization, owner-exit cleanup, and stale-token rejection.</p>
+</li>
+</ol>
+<h1 id="invariants-for-implementers">Invariants For Implementers<a class="headerlink" href="#invariants-for-implementers" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Do not make <code>local_serving_ref</code> a P2P source authority.</li>
+<li>Do not publish local-only values directly.</li>
+<li>Do not make <code>publish_replica()</code> create serving lineage or replace
+  <code>PublishedModelVersion</code> / representation closeout.</li>
+<li>Do not add SDK direct Global Store access for key mapping, artifact metadata,
+  or control-path operations.</li>
+<li>Do not use broad fallback behavior to hide missing token, stale generation,
+  owner mismatch, or transport-readiness mismatch. Fail closed with a concrete
+  error.</li>
+<li>Do not preserve legacy materialize-into-target publication authority as an
+  independent publish semantic. <code>MaterializeIntoTarget</code> may materialize bytes
+  and may feed a binding transition, but it must not produce a publishable token
+  by itself.</li>
+<li>Do not introduce a scope-kind dispatcher that accepts both
+  <code>MATERIALIZE_INTO_TARGET</code> and <code>BINDING_CURRENT_VALUE</code> token families.
+  <code>PublishTargetReplica</code> has one authority model: binding current value
+  publication.</li>
+<li>Rename publish-facing proto/API fields from <code>target_publication_token</code> to
+  <code>binding_current_value_publication_token</code> in the cutover change. A temporary
+  internal alias may exist inside one implementation PR, but it is not accepted
+  as the final state. Materialize responses must not fill any publish-token
+  field.</li>
+</ul>
+<h1 id="non-negotiable-risk-controls">Non-Negotiable Risk Controls<a class="headerlink" href="#non-negotiable-risk-controls" title="Permanent link">&para;</a></h1>
+<p>These controls are part of the plan, not optional review advice.</p>
+<ul>
+<li>[x] Treat Phase 0 through Phase 4 as one consistency tranche for any
+      framework-facing enablement. Individual phases can land separately, but
+      no downstream vLLM path may depend on publication until all four pass.</li>
+<li>[x] Keep <code>PublishTargetReplica</code> fail-closed by default. Missing binding
+      fields, absent current binding value, local-only state, owner mismatch,
+      stale generation, retired token, or active mutation must return explicit
+      errors, not fallback to materialize-target publish.</li>
+<li>[x] Remove standalone publish authority from <code>MaterializeIntoTarget</code> and
+      <code>MaterializeIntoMappedTarget</code> in the same change set that introduces
+      binding-current-value publication validation. Avoid a transition window
+      where both token models are accepted.</li>
+<li>[x] Mint publishable tokens only from a daemon-owned binding record snapshot
+      captured under lock after the value is artifact-backed current. Never
+      mint from a target materialization result alone.</li>
+<li>[x] Clear or invalidate token state on every generation-changing transition
+      before exposing the new state to callers. Mint the replacement token only
+      after the new current value is committed and revalidated.</li>
+<li>[x] Make lifecycle terminalization a shared helper used by explicit retire,
+      owner-exit cleanup, and publish-failure cleanup after partial LIP/GS
+      success. One-off cleanup code is not acceptable.</li>
+<li>[x] Mutation guards must be exact to
+      <code>(binding_id, binding_value_id, seal_generation)</code>. Do not block unrelated
+      binding generations or unrelated bindings.</li>
+<li>[x] Do not add ad-hoc feature flags or environment variables to manage this
+      rollout. If a configuration knob is needed, place it in the unified
+      runtime config system.</li>
+<li>[x] GS expiry or source filtering may improve diagnostics, but it must never
+      be the primary safety mechanism for ephemeral publication lifetime.</li>
+</ul>
+<h1 id="phases-and-milestones">Phases And Milestones<a class="headerlink" href="#phases-and-milestones" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Phase 0: Local Acquire Snapshot Hardening</li>
+<li>[x] Add a daemon-side local acquire snapshot helper, for example
+        <code>validate_and_snapshot_local_serving_ref(...)</code>, owned near
+        <code>MaterializationController</code> or <code>BindingRegistry</code>.</li>
+<li>[x] Validate and copy all response-critical fields under the same binding
+        record lock: binding id, value id, seal generation, handle bytes,
+        payload descriptors, target index, target layout size, device UUID,
+        member, target layout hash, daemon id/session id, tensor schema hash,
+        serving build digest, state, and retained/local-owner policy.</li>
+<li>[x] Fill <code>AcquireBindingValueResponse</code> only from that immutable snapshot.
+        Do not refetch the record to populate mem handle, payload descriptors,
+        target index bytes, current value, or acquired value.</li>
+<li>[x] Preserve the current retained-binding behavior: retained bindings
+        acquire attachment refs; ordinary caller-owned local acquire does not
+        pretend to be retained.</li>
+<li>[x] Keep <code>AcquireBindingValue</code> local-only via loopback/UDS checks.</li>
+<li>
+<p>[x] Update or add daemon tests for stale <code>local_serving_ref</code>, wrong owner
+        pid, wrong device UUID, wrong member, wrong layout hash, wrong schema
+        hash, wrong serving build digest, and response snapshot stability.</p>
+</li>
+<li>
+<p>[x] Phase 1: Canonical Token Name And Propagation After Artifact-Backed Transition</p>
+</li>
+<li>[x] Add the canonical token/scope concept:
+        <code>BindingCurrentValuePublicationToken</code>, encoded as a capability token
+        whose scope is a new <code>BindingCurrentValuePublicationScope</code>.
+        <code>PublishTargetReplica</code> must accept only this semantic token.</li>
+<li>[x] Add or rename the capability audience so binding current value
+        publication cannot be confused with legacy target materialization
+        publication. Preferred shape:
+        <code>CAPABILITY_AUDIENCE_BINDING_CURRENT_VALUE_PUBLICATION</code>.</li>
+<li>[x] Extend <code>PromoteBindingCurrentValueResponse</code> with
+        <code>bytes binding_current_value_publication_token</code>.</li>
+<li>[x] Extend <code>BindingPromotionStatus</code> with
+        <code>bytes binding_current_value_publication_token</code>.</li>
+<li>[x] Rename <code>PublishTargetReplicaRequest.target_publication_token</code> to
+        <code>binding_current_value_publication_token</code> and update SDK/C++ callsites.
+        Reusing the existing field number is acceptable; accepting old token
+        semantics is not.</li>
+<li>[x] Rename binding-centric response fields that currently use
+        <code>target_publication_token</code> (<code>CreateOwnedBindingResponse</code>,
+        <code>RefillOwnedBindingResponse</code>, and any binding artifact commit response
+        added later) to <code>binding_current_value_publication_token</code> in the same
+        proto change.</li>
+<li>[x] Regenerate protobuf code with <code>bash tools/build_proto_python.sh</code>.</li>
+<li>[x] Update <code>promote_binding_current_value_impl()</code> so that after the current
+        value becomes <code>BINDING_STATE_READY_ARTIFACT</code>, the daemon mints a
+        <code>BindingCurrentValuePublicationToken</code> for that same binding value
+        generation.</li>
+<li>[x] Preserve existing fast-path behavior for already mi2-backed current
+        values, but ensure it can return or recreate a valid token when the
+        value is publishable.</li>
+<li>[x] Update async promotion job status propagation so completed jobs carry
+        the token through <code>StartPromoteBindingCurrentValue</code> and
+        <code>GetBindingPromotionStatus</code>.</li>
+<li>[x] Update representation closeout paths in
+        <code>assembly_operation_service.cc</code> so successful
+        <code>complete_pure_transform_publication_from_binding(...)</code> and
+        <code>complete_binding_finalize_publication_from_binding(...)</code> leave the
+        binding current value artifact-backed and publish-token capable.</li>
+<li>[x] Update <code>OwnedBindingSlot.promote_current_value()</code>,
+        <code>start_promote_current_value()</code>, and <code>get_promotion_status()</code> to save
+        returned <code>BindingCurrentValuePublicationToken</code> bytes instead of
+        clearing publication-token state on successful promotion.</li>
+<li>[x] Update <code>tensorcast/serving/preload.py</code> helpers to preserve promotion
+        token state when polling async promotion.</li>
+<li>
+<p>[x] Keep local-only <code>publish_replica()</code> failure behavior unchanged when no
+        artifact-backed selection or no binding-current-value publication token
+        exists.</p>
+</li>
+<li>
+<p>[x] Phase 2: Remove Materialize Publish Authority And Bind Tokens To
+      <code>BindingValueRef</code></p>
+</li>
+<li>[x] Replace publication validation use of retired
+        <code>TargetPublicationScope</code> with <code>BindingCurrentValuePublicationScope</code>.
+        The scope must contain:
+        <code>publication_id</code>, <code>binding_id</code>, <code>binding_layout_id</code>,
+        <code>binding_value_id</code>, <code>seal_generation</code>, owner pid/session identity,
+        device UUID, target layout hash, byte-space, resolved selection, and
+        operation id.</li>
+<li>[x] Extend <code>TargetPublicationRegistry::Record</code>, or rename it to a
+        binding-current publication registry if that is cleaner, with the same
+        binding value identity fields and terminal lifecycle fields.</li>
+<li>[x] Add a binding-value snapshot type for token minting. The snapshot must
+        be captured under the binding record lock and include owner pid, device
+        UUID, target layout hash, selection, byte-space, storage layout, and
+        binding value identity.</li>
+<li>[x] Stop minting publishable tokens from <code>MaterializeIntoTarget</code> and
+        <code>MaterializeIntoMappedTarget</code>. Remove/reserve
+        <code>MaterializeIntoTargetResponse.target_publication_token</code> and delete all
+        SDK reads of that response field. The response must not carry bytes
+        accepted by <code>PublishTargetReplica</code>.</li>
+<li>[x] Remove standalone target-materialization publication records. A
+        publication registry record may be created only from a daemon-owned
+        binding current value snapshot.</li>
+<li>[x] Remove or ignore client-provided target publication authority in
+        <code>CreateBindingRequest.target_publication_token</code> and
+        <code>CommitBindingArtifactRequest.target_publication_token</code>. If these RPCs
+        commit an artifact-backed binding current value, the daemon mints a new
+        binding-current-value token after the commit from the locked current
+        value snapshot.</li>
+<li>[x] Add <code>BindingRegistry</code> access to <code>TargetPublishService::Dep</code>, or move the
+        binding-backed publish validation into a service that can see both
+        <code>TargetPublicationRegistry</code> and <code>BindingRegistry</code>.</li>
+<li>[x] In <code>PublishTargetReplica</code>, validate in this order:
+        token signature/audience/issuer/expiry; request byte-space and
+        operation id; token scope vs publication record; token scope vs current
+        <code>BindingRegistry</code> record; current value artifact-backed status; owner
+        alive/session match; selection/byte-space/layout/device/owner equality.</li>
+<li>[x] Reject all tokens that use the old target-materialization publication
+        audience/scope, have missing binding fields, or cannot be matched to the
+        daemon-owned binding current value.</li>
+<li>[x] Make begin-update, refill, swap, mark-dirty, mark-ready-local, and
+        artifact commit paths clear stale token state for any new generation.</li>
+<li>
+<p>[x] Add tests for binding value id mismatch, seal generation mismatch,
+        owner pid mismatch, device UUID mismatch, layout mismatch, selection
+        mismatch, byte-space mismatch, missing binding fields, old
+        materialize-target token rejection, and <code>MaterializeIntoTarget</code> no
+        longer returning a publishable token.</p>
+</li>
+<li>
+<p>[x] Phase 3: Publish, Retire, And Owner-Exit Lifecycle Closure</p>
+</li>
+<li>[x] Add terminal publication state to <code>TargetPublicationRegistry::Record</code>,
+        including consumed/published marker, <code>published_lease_id</code>,
+        <code>published_replica_id</code>, and publish operation id.</li>
+<li>[x] Make successful <code>PublishTargetReplica</code> atomically mark the publication
+        record consumed/published after GS registration and LIP commit succeed.</li>
+<li>[x] Support idempotent replay for the same token and same operation id by
+        returning the same lease id and replica id without creating a second
+        active replica.</li>
+<li>[x] Reject the same token with a different operation id after first publish.</li>
+<li>[x] Add a terminalize/retire method owned by <code>TargetPublishService</code> or a
+        shared publication lifecycle helper. <code>RetirePublishedReplica</code> must call
+        it after successful LIP/GS revoke.</li>
+<li>[x] On retire, erase or terminalize the target publication registry record,
+        release the lifecycle publish capability, release the retention lease,
+        and make future redemption of the same token fail.</li>
+<li>[x] Hook owner-exit cleanup into the same terminalization path. The pid
+        monitor callback currently reaches lifecycle, region registry, handle
+        leases, and binding registry; extend it or a daemon-level coordinator so
+        publication registry and lifecycle capability cleanup happen too.</li>
+<li>[x] Ensure owner-exit cleanup also unregisters any published GS replica and
+        revokes local exports. Reuse <code>LipManager</code> revoke/sweep behavior, but do
+        not rely on it as the only cleanup path.</li>
+<li>
+<p>[x] Add race tests for publish vs retire, publish vs owner exit, and
+        duplicate publish during async <code>StartPublishTargetReplica</code>.</p>
+</li>
+<li>
+<p>[x] Phase 4: Daemon-Side Published-Value Mutation Guard</p>
+</li>
+<li>[x] Add active published-current state to <code>BindingRegistry::Record</code>, or an
+        equivalent authoritative guard reachable from all mutation paths.</li>
+<li>[x] On successful binding-backed publish, mark the exact
+        <code>(binding_id, binding_value_id, seal_generation)</code> as published.</li>
+<li>[x] Make <code>BeginBindingUpdate</code>, refill, direct artifact commit, freeze,
+        seal, dirty transition, close, and other mutation paths reject while an
+        active published current value exists. Error message should instruct
+        callers to call <code>retire()</code> first.</li>
+<li>[x] Clear the guard only after successful retire or owner-exit cleanup.</li>
+<li>
+<p>[x] Add direct RPC tests that bypass Python SDK and prove mutation is
+        rejected while published.</p>
+</li>
+<li>
+<p>[x] Phase 5: SDK And Serving Readiness Handoff</p>
+</li>
+<li>[x] Update Python error messages for <code>OwnedBindingSlot.publish_replica()</code>:
+        non artifact-backed current value, missing token, stale token, already
+        published, and retire-required mutation should each be actionable.</li>
+<li>[x] Update <code>InplaceSlot</code> and artifact materialization convenience APIs so
+        <code>MaterializeIntoTarget</code> no longer implies publishability. They must
+        either route publish through a daemon-owned binding current value or
+        fail with an actionable error.</li>
+<li>[x] Ensure <code>owner_pid=None</code> paths use the runtime/effective pid helper
+        consistently instead of high-level framework <code>os.getpid()</code> shortcuts.</li>
+<li>[x] Add SDK tests for promotion token save, async promotion status token
+        save, local-only publish failure, materialize-only publish rejection,
+        publish after promotion success, and mutation rejection while
+        published.</li>
+<li>[x] Add a TensorCast-side readiness contract note for vLLM handoff:
+        default health must not wait for async publish; explicit P2P-ready mode
+        must fail closed if publication fails.</li>
+<li>[x] Do not start vllm integration until Phase 0 through Phase 4 are
+        accepted and tested.</li>
+</ul>
+<p>: Optional GS Diagnostics Only
+  - [ ] Decide whether to persist <code>MemoryInfo.expires_at</code> into
+        <code>artifact_replicas.expires_at</code> for memory replica registration.
+  - [ ] If implemented, filter expired memory replicas from source selection and
+        add diagnostics explaining expiry rejection.
+  - [ ] Do not treat GS expiry as an MVP safety boundary. Retire and owner-exit
+        terminal cleanup remain required even if expiry filtering exists.
+  - [ ] Do not add binding generation fields to the main GS schema for MVP. Use
+        logs/spans/diagnostics if debugging needs them.</p>
+<h1 id="test-plan">Test Plan<a class="headerlink" href="#test-plan" title="Permanent link">&para;</a></h1>
+<p>Run tests with the repository-required commands and environment.</p>
+<h2 id="proto">Proto<a class="headerlink" href="#proto" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] After any <code>.proto</code> change:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>bash<span class="w"> </span>tools/build_proto_python.sh
+</span></code></pre></div>
+<h2 id="c-daemon">C++ / Daemon<a class="headerlink" href="#c-daemon" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Local acquire hardening:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//daemon:grpc_service_impl_operation_rpc_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span>--test_output<span class="o">=</span>errors<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<ul>
+<li>[x] Publish token scope, old materialize-token rejection, stale token,
+      duplicate publish, and lifecycle:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//daemon:grpc_service_impl_publish_target_replica_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>--test_output<span class="o">=</span>errors<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<p>Required coverage in this target:
+  binding value id mismatch, seal generation mismatch, owner/session mismatch,
+  device/layout/selection/byte-space mismatch, removed
+  <code>TargetPublicationScope</code>/target-materialization token authority,
+  <code>MaterializeIntoTarget</code> response has no publishable token, duplicate same-op
+  idempotence, duplicate different-op rejection, and published-value terminal
+  cleanup.</p>
+<ul>
+<li>[x] Retire cleanup:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//daemon:grpc_service_impl_retire_published_replica_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>--test_output<span class="o">=</span>errors<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<ul>
+<li>[x] Owned binding promotion and mutation guards:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//daemon:owned_binding_service_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>--test_output<span class="o">=</span>errors<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<ul>
+<li>[x] Lifecycle / owner-exit integration:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span>//daemon:session_lifecycle_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>--test_output<span class="o">=</span>errors<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<ul>
+<li>[x] Final daemon build gate:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>bazel<span class="w"> </span>build<span class="w"> </span>//daemon:tensorcast_daemon<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span>--noshow_progress<span class="w"> </span>--noshow_loading_progress<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span>--ui_event_filters<span class="o">=</span>warning,error
+</span></code></pre></div>
+<h2 id="python-sdk">Python SDK<a class="headerlink" href="#python-sdk" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[x] Activate the venv before running Python commands:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>pytest<span class="w"> </span>tests/python/test_binding.py<span class="w"> </span>tests/python/test_inplace_slot.py<span class="w"> </span>tests/python/test_serving_preload_acquire.py
+</span></code></pre></div>
+<ul>
+<li>[x] Lint and format touched Python files:</li>
+</ul>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>ruff<span class="w"> </span>check<span class="w"> </span>tensorcast/api/store<span class="w"> </span>tensorcast/serving<span class="w"> </span>tests/python/test_binding.py<span class="w"> </span>tests/python/test_inplace_slot.py<span class="w"> </span>tests/python/test_serving_preload_acquire.py
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>ruff<span class="w"> </span>format<span class="w"> </span>tensorcast/api/store<span class="w"> </span>tensorcast/serving<span class="w"> </span>tests/python/test_binding.py<span class="w"> </span>tests/python/test_inplace_slot.py<span class="w"> </span>tests/python/test_serving_preload_acquire.py
+</span></code></pre></div>
+<h1 id="acceptance-gates">Acceptance Gates<a class="headerlink" href="#acceptance-gates" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] A stale <code>local_serving_ref</code> acquire fails or returns the exact old
+      validated snapshot; it never validates one value and returns another.</li>
+<li>[x] Local-only current values still cannot be published.</li>
+<li>[x] Promotion success returns and saves a
+      <code>BindingCurrentValuePublicationToken</code> for the same binding value
+      generation.</li>
+<li>[x] Serving representation closeout success leaves the binding current value
+      publish-token capable without redefining <code>publish_replica()</code> as serving
+      lineage publication.</li>
+<li>[x] <code>PublishTargetReplica</code> accepts only
+      <code>BindingCurrentValuePublicationToken</code> semantics and rejects
+      materialize-target tokens, missing binding fields, stale
+      <code>binding_value_id</code>, stale <code>seal_generation</code>, wrong owner pid, wrong
+      device UUID, wrong layout hash, wrong selection, and wrong byte-space.</li>
+<li>[x] <code>MaterializeIntoTarget</code> and <code>MaterializeIntoMappedTarget</code> still
+      materialize bytes correctly, but no longer return a publishable token or
+      create standalone publication authority.</li>
+<li>[x] Duplicate same-token same-operation publish returns the same result;
+      duplicate same-token different-operation publish fails.</li>
+<li>[x] Retire removes GS discovery, revokes local export, terminalizes the
+      target publication record, releases lifecycle capability, and rejects
+      same-token republish.</li>
+<li>[x] Owner exit removes GS discovery, revokes local export, terminalizes the
+      publication record/capability, and rejects same-token republish.</li>
+<li>[x] Direct daemon RPC mutation paths reject while the current binding value is
+      actively published.</li>
+<li>[x] Existing materialize-into-target publish tests are rewritten to establish
+      a daemon-owned binding current artifact-backed value before publishing;
+      no test relies on target materialization as publication authority.</li>
+<li>[x] SDK publish and retire behavior is covered by Python tests.</li>
+</ul>
+<p>For vllm work</p>
+<p>Only start the vllm producer/consumer work after all of the following
+are true:</p>
+<ul>
+<li>Phase 0 through Phase 4 are implemented, reviewed, and tested.</li>
+<li>A TensorCast daemon-owned binding can be frozen local-ready, promoted to
+  artifact-backed current value, published, discovered through Global Store,
+  retired, and then rejected on same-token republish.</li>
+<li>A direct RPC attempt to mutate the published current value fails before any
+  bytes are overwritten.</li>
+<li>An owner-exit test proves new consumers cannot silently read the old source.</li>
+<li>Python SDK exposes a stable, documented sequence:
+  <code>promote_current_value()</code> or serving closeout, then <code>publish_replica()</code>, then
+  <code>retire()</code>.</li>
+<li>Diagnostics distinguish at least these rejection families: missing token,
+  local-only value, stale binding generation, owner mismatch, retired token,
+  active published mutation, and no eligible source.</li>
+</ul>
+<h1 id="rollout-and-backout">Rollout And Backout<a class="headerlink" href="#rollout-and-backout" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Land Phase 0 independently. It should not change public publish behavior.</li>
+<li>Land proto/token propagation in Phase 1 with regenerated stubs and SDK tests.</li>
+<li>Land Phase 2 as the semantic cutover: remove materialize-target publish
+  authority and require <code>BindingCurrentValuePublicationToken</code> validation in
+  <code>PublishTargetReplica</code> in the same change set.</li>
+<li>Land lifecycle terminal cleanup and mutation guards before enabling any
+  framework integration.</li>
+<li>Keep the vllm optional publish path disabled by default until
+  TensorCast gates pass.</li>
+<li>Backout strategy for Phase 2 is to disable binding-current-value publication
+  entirely and keep ordinary materialization working. Do not back out by
+  re-enabling standalone materialize-target publish tokens.</li>
+</ul>
+<h1 id="risks-and-tracking">Risks And Tracking<a class="headerlink" href="#risks-and-tracking" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[ ] Token mint timing: minting before the binding current value is stable can
+      issue a token for the wrong generation. Always mint from a locked snapshot
+      or revalidate immediately after minting before storing the token.</li>
+<li>[ ] Retire race: LIP/GS revoke without target publication terminalization can
+      permit republish within token TTL. Retire must call one shared terminal
+      cleanup path.</li>
+<li>[ ] Owner-exit race: pid cleanup currently spans several subsystems. Add tests
+      that kill or simulate the owner while publish is pending and while publish
+      is active.</li>
+<li>[ ] Materialize cutover risk: <code>MaterializeIntoTarget</code>, <code>InplaceSlot</code>, and
+      artifact convenience APIs may currently assume token-only publication.
+      Update those SDK paths to either create/use a daemon-owned binding current
+      value before publish or fail with an actionable "publish requires binding
+      current value" error. Do not keep a legacy token branch.</li>
+<li>[ ] Dual-scope drift risk: any lingering validation branch that accepts old
+      target materialization scope will become a future consistency hole. Add a
+      negative test that mints an old-style token and proves
+      <code>PublishTargetReplica</code> rejects it.</li>
+<li>[ ] GS expiry temptation: expiry filtering is useful diagnostics, but it must
+      not replace explicit unregister/revoke/capability cleanup.</li>
+<li>[ ] vLLM readiness coupling: do not let optional producer publish extend the
+      default health critical path. P2P-required mode can wait and fail closed;
+      default serving health cannot.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Target design owner: <code>docs/designs/0103-volatile-publication-subjects-and-multi-replica-semantics.md</code></li>
+<li>Binding current value semantics: <code>docs/designs/0084-binding-unified-model-and-contract.md</code></li>
+<li>Serving publication trunk: <code>docs/designs/0111-source-to-serving-builder-and-representation-publication.md</code></li>
+<li>Binding-native serving boundary: <code>docs/designs/0112-binding-native-serving-realization-and-publication.md</code></li>
+<li>Local-ready acquire contract: <code>docs/designs/0116-prefetch-serving-binding-target.md</code></li>
+<li>vllm downstream plan:
+  <code>/opt/vllm/docs/tensorcast/plans/tensorcast_framework_owned_ephemeral_artifact_replica_plan.md</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

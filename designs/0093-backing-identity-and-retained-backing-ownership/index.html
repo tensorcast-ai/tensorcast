@@ -1,0 +1,3294 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0093-backing-identity-and-retained-backing-ownership/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Phase 2 - Backing Identity, Retained Backing Ownership, and Shared Lifecycle Capability - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Phase 2 - Backing Identity, Retained Backing Ownership, and Shared Lifecycle Capability
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>After <code>0090</code> separates routed claim truth from visibility truth and <code>0091</code> makes content truth shared, TensorCast still
+lacks one complete shared contract for the next two layers:</p>
+<ul>
+<li>backing truth,</li>
+<li>lifecycle-backed serving capability.</li>
+</ul>
+<p>Current code already exposes <code>BackingIdentity</code>, <code>ServingCapability</code>, <code>AuthorityRecord</code>, and <code>BodyBackingIntent</code>, but
+those names are still only partially defined:</p>
+<ul>
+<li><code>BackingIdentity</code> does not yet carry the exact core subject identity,</li>
+<li><code>AuthorityRecord</code> does not yet reference backing truth explicitly,</li>
+<li><code>BodyStore</code> still mixes authority index state with backing-local handle state,</li>
+<li><code>ServingCapability</code> is still an ad hoc response projection instead of the shared lifecycle contract promised by
+  <code>0092</code>,</li>
+<li>high-cardinality routed artifacts still derive body-backing behavior mostly from local access-class heuristics instead
+  of treating <code>StorePolicy</code> as their single policy input,</li>
+<li><code>policy_backed_path</code> was reserved by <code>0090</code> but not yet defined precisely enough to drive <code>claimed_invisible -&gt;
+  claimed_visible</code>.</li>
+</ul>
+<p>Phase 2 closes that gap.</p>
+<p>This design defines:</p>
+<ul>
+<li>the exact relationship between <code>BackingIdentity</code> and <code>ReplicaKey</code>,</li>
+<li>the split between stable backing-subject identity and per-binding instance generation,</li>
+<li>how <code>AuthorityRecord</code> references retained backing truth,</li>
+<li>how <code>BodyStore</code> remains an authority-local index while pointing to backing truth rather than owning it,</li>
+<li>the authority-to-dataplane bridge through <code>ResolvedSourceCapability</code>,</li>
+<li>the authoritative state machine for backing replacement, invalidation, retirement, and claim loss in an executable
+  phase-2 scope,</li>
+<li><code>ServingCapability</code> as a real lifecycle-kernel contract rather than a body-store convenience struct,</li>
+<li>the lifecycle kernel as a shared adapter over existing lease and token owners in this phase rather than a brand-new
+  physical registry cut,</li>
+<li>how high-cardinality routed artifacts derive <code>BodyBackingIntent</code> from <code>StorePolicy</code>, route role, locality, and access
+  pattern,</li>
+<li>when policy-backed rematerialization is allowed to restore <code>claimed_invisible -&gt; claimed_visible</code>,</li>
+<li>the recoverability boundary for authority records, backing records, policy visibility references, and serving
+  capabilities.</li>
+</ul>
+<h1 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h1>
+<p>Accepted and implemented for the Phase-2 backing-truth and authority-to-dataplane bridge baseline on 2026-03-11.</p>
+<p>Landed outcomes:</p>
+<ul>
+<li><code>BackingIdentity</code> is now the full <code>ReplicaKey</code>-carrying backing subject under
+  <code>core/store/runtime/ingestion/artifact_truth.h</code>, and serving paths validate that identity before use.</li>
+<li>daemon authority state and backing truth are split between <code>AuthorityRecord</code> / authority entries and <code>BackingRecord</code> /
+  backing tables instead of hiding backing ownership inside <code>BodyHandle</code> fields.</li>
+<li><code>ServingCapability</code>, <code>LifecycleOwnerRef</code>, and <code>ResolvedSourceCapability</code> are concrete shared bridge objects under
+  <code>daemon/service/body_backing_types.h</code>.</li>
+<li><code>payload_ref</code>, home-authority resolution, and policy-backed restore all return <code>ResolvedSourceCapability</code> before
+  lowering into the shared dataplane.</li>
+<li><code>PolicyVisibilityRef</code> now carries verified content plus actionable control truth for policy-backed restore, while
+  <code>claim_deleted</code> remains non-resurrectable.</li>
+</ul>
+<p>What remains outside the completed <code>0093</code> cut is now explicit:</p>
+<ul>
+<li><code>0094</code> owns the executable lifecycle-kernel object model layered on top of this baseline.</li>
+<li><code>0100</code> owns routed ingress, issuer handoff, distributed protocol, and trust follow-up work above this bridge.</li>
+</ul>
+<h1 id="decision-record">Decision Record<a class="headerlink" href="#decision-record" title="Permanent link">&para;</a></h1>
+<p>Accepted decisions for the landed Phase-2 cut:</p>
+<ol>
+<li><code>0093</code> is the repository baseline for retained backing truth, <code>ServingCapability</code>, and
+   <code>ResolvedSourceCapability</code>.</li>
+<li><code>BodyStore</code> and its concrete byte-artifact implementation remain an authority index plus backing-truth table, not a
+   hidden lifecycle owner.</li>
+<li>The backing subject is identified by the full retained <code>ReplicaKey</code>, while repeated bindings of the same backing are
+   distinguished by <code>instance_generation</code>.</li>
+<li><code>0094</code> extends lifecycle semantics above this baseline, but it does not retake ownership of backing truth or the
+   authority-to-dataplane bridge defined here.</li>
+</ol>
+<p>The sections below preserve the pre-landing problem statement that motivated the accepted <code>0093</code> cut.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The pre-landing repository state had five structural ambiguities.</p>
+<h2 id="1-backingidentity-is-under-specified">1. <code>BackingIdentity</code> is under-specified<a class="headerlink" href="#1-backingidentity-is-under-specified" title="Permanent link">&para;</a></h2>
+<p>Current <code>BackingIdentity</code> is only:</p>
+<ul>
+<li><code>physical_artifact_id</code>,</li>
+<li><code>device</code>.</li>
+</ul>
+<p>That is not enough to answer the actual shared question:</p>
+<ul>
+<li>which exact core backing subject is authoritative right now.</li>
+</ul>
+<p>It also leaves the relationship to the repository-wide <code>ReplicaKey</code> contract undefined.</p>
+<h2 id="2-authorityrecord-cannot-point-to-backing-truth">2. <code>AuthorityRecord</code> cannot point to backing truth<a class="headerlink" href="#2-authorityrecord-cannot-point-to-backing-truth" title="Permanent link">&para;</a></h2>
+<p>Current <code>AuthorityRecord</code> can tell callers:</p>
+<ul>
+<li>claim state,</li>
+<li>visibility kind,</li>
+<li>route scope,</li>
+<li>expiry.</li>
+</ul>
+<p>But it cannot answer:</p>
+<ul>
+<li>which retained backing it currently owns,</li>
+<li>whether visibility depends on that backing or on a policy-backed path,</li>
+<li>whether future lifecycle promises are being minted against a live backing or an on-demand rematerialization path.</li>
+</ul>
+<p>That forces <code>BodyStore</code> internals and controller code to smuggle backing truth through <code>BodyHandle</code> fields instead of
+through an explicit contract.</p>
+<h2 id="3-bodystore-still-conflates-authority-index-and-backing-truth">3. <code>BodyStore</code> still conflates authority index and backing truth<a class="headerlink" href="#3-bodystore-still-conflates-authority-index-and-backing-truth" title="Permanent link">&para;</a></h2>
+<p>Current <code>ByteArtifactRuntimeState::AuthorityEntry</code> stores:</p>
+<ul>
+<li>authority metadata,</li>
+<li>verified content projection,</li>
+<li>last observation,</li>
+<li>the visible <code>BodyHandle</code>.</li>
+</ul>
+<p>That means the authority index currently acts as:</p>
+<ul>
+<li>claim truth,</li>
+<li>visibility truth,</li>
+<li>retained-backing pointer,</li>
+<li>lifecycle staging cache.</li>
+</ul>
+<p>This violates the <code>0092</code> layering rule that authority-local state may reference backing truth but must not replace it.</p>
+<h2 id="4-servingcapability-is-not-yet-a-real-lifecycle-contract">4. <code>ServingCapability</code> is not yet a real lifecycle contract<a class="headerlink" href="#4-servingcapability-is-not-yet-a-real-lifecycle-contract" title="Permanent link">&para;</a></h2>
+<p>Current code synthesizes <code>ServingCapability</code> in at least two ad hoc places:</p>
+<ul>
+<li><code>ByteArtifactBodyStore::get(...)</code>,</li>
+<li><code>PayloadTransportBroker::resolve_payload_ref_capability(...)</code>.</li>
+</ul>
+<p>Those projections are useful, but they are not yet the shared lifecycle kernel promised by <code>0092</code> because:</p>
+<ul>
+<li><code>BodyStore</code> is minting a capability-shaped object without owning the lifecycle lease or pin semantics,</li>
+<li>the capability id is currently just a convenient carrier such as <code>artifact_id</code> or <code>payload_ref</code>,</li>
+<li>future capability front doors such as local memfd, CUDA IPC, publish handles, and policy-backed rematerialization are
+  not yet terminating in one shared mint and finalization model.</li>
+</ul>
+<h2 id="5-routed-high-cardinality-artifacts-are-not-yet-real-storepolicy-clients">5. Routed high-cardinality artifacts are not yet real <code>StorePolicy</code> clients<a class="headerlink" href="#5-routed-high-cardinality-artifacts-are-not-yet-real-storepolicy-clients" title="Permanent link">&para;</a></h2>
+<p>Current <code>BodyBackingManager::classify_intent(...)</code> mostly derives intent from:</p>
+<ul>
+<li><code>BodyAccessClass</code>,</li>
+<li>a partially resolved local-stable policy.</li>
+</ul>
+<p>That is not the final contract because the authoritative derivation must consider:</p>
+<ul>
+<li>resolved <code>StorePolicy</code>,</li>
+<li>route role,</li>
+<li>locality,</li>
+<li>access pattern,</li>
+<li>object shape or fanout hints when relevant.</li>
+</ul>
+<p>Without that, <code>policy_backed_path</code> cannot become precise enough to restore visibility honestly.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define <code>BackingIdentity</code> as the shared backing-truth projection for local retained backings.</li>
+<li>Define the exact relationship between <code>BackingIdentity</code> and <code>ReplicaKey</code>.</li>
+<li>Separate stable backing-subject identity from per-binding instance generation.</li>
+<li>Make <code>AuthorityRecord</code> reference backing truth explicitly instead of relying on hidden <code>BodyHandle</code> ownership.</li>
+<li>Keep <code>BodyStore</code> authority-local while splitting authority index from retained-backing truth.</li>
+<li>Define one backing lifecycle state machine covering replacement, invalidation, retirement, and claim loss.</li>
+<li>Make <code>ServingCapability</code> a real shared lifecycle contract for:</li>
+<li>routed <code>HomeBatchGet</code>,</li>
+<li><code>payload_ref</code>,</li>
+<li>local zero-copy handle paths,</li>
+<li>remote source resolution,</li>
+<li>future policy-backed rematerialization.</li>
+<li>Make the phase-2 lifecycle kernel implementable as one shared mint/release API over the existing lease and token
+  registries rather than requiring immediate physical storage convergence.</li>
+<li>Keep <code>StorePolicy</code> as the single declarative policy surface for high-cardinality artifacts.</li>
+<li>Define how <code>BodyBackingIntent</code> is derived from <code>StorePolicy</code>, route role, locality, and access pattern.</li>
+<li>Define the exact rule for <code>claimed_invisible -&gt; claimed_visible</code> under policy-backed rematerialization.</li>
+<li>Make the phase-2 recoverability boundary explicit instead of letting daemon-local maps silently become semantic truth.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine <code>SelectionIdentity</code>, <code>ContentIdentity</code>, or <code>VerifiedContentDescriptor</code>. <code>0091</code> remains authoritative there.</li>
+<li>Redefine routed claim truth or the phase-0 recovery boundary. <code>0090</code> remains authoritative there.</li>
+<li>Make high-cardinality routed claim truth durable across restart or failover beyond what <code>0090</code> already promises.</li>
+<li>Introduce a second user-declared policy surface beside <code>StorePolicy</code>.</li>
+<li>Put <code>ServingCapability</code> itself into persistent authority truth.</li>
+<li>Redefine the public SDK user-facing surface in this phase.</li>
+<li>Define the final shared remote-source ordering for every future capability kind; this phase defines the contract, not
+  every transport optimization.</li>
+<li>Collapse every existing lifecycle owner (<code>payload_ref</code>, handle leases, retention handles, placement lease tokens) into
+  one brand-new physical registry in this phase.</li>
+<li>Require <code>BackingIdentity</code> by itself to be globally unique across every retire and rematerialize cycle.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-phase-role-and-layering">1. Phase role and layering<a class="headerlink" href="#1-phase-role-and-layering" title="Permanent link">&para;</a></h2>
+<p><code>0092</code> defines the repository-wide layering:</p>
+<ul>
+<li>selection kernel,</li>
+<li>content kernel,</li>
+<li>lifecycle kernel,</li>
+<li>backing truth,</li>
+<li>authority-local state.</li>
+</ul>
+<p><code>0090</code> then defines routed authority semantics.</p>
+<p><code>0091</code> then defines shared selection and content truth.</p>
+<p>Phase 2 is the required next step:</p>
+<ul>
+<li>it defines backing truth precisely,</li>
+<li>it defines how authority points to that truth,</li>
+<li>it makes lifecycle-backed serving capability real,</li>
+<li>it defines the normalized result that authority and lifecycle hand to shared lowering,</li>
+<li>it makes routed high-cardinality artifacts consume <code>StorePolicy</code> as policy input rather than as an optional afterthought.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["artifact_id&lt;br&gt;authority lookup"] --&gt; B["AuthorityRecord"]
+  B --&gt;|retained_backing_identity| C["BackingRecord"]
+  C --&gt;|replica_key| D["core backing truth"]
+  B --&gt;|policy_visibility_ref| E["StorePolicy-backed path"]
+  B --&gt;|mint through lifecycle kernel| F["ServingCapability"]
+  F --&gt; G["ResolvedSourceCapability"]
+  E --&gt; G
+  G --&gt; H["payload_ref / loader / local handle / remote source"]</code></pre>
+<p>Constitutional rules:</p>
+<ol>
+<li><code>AuthorityRecord</code> is allowed to reference backing truth, but not to replace it.</li>
+<li><code>BodyStore</code> remains authority-local state, not a second physical lifecycle owner.</li>
+<li><code>ServingCapability</code> is lifecycle-kernel state, not authority truth.</li>
+<li>Any path that will move bytes must cross one shared authority-to-dataplane bridge before realization.</li>
+<li><code>StorePolicy</code> remains the only declarative placement and durability surface.</li>
+<li><code>BodyBackingIntent</code> remains a derived lowering hint only.</li>
+</ol>
+<h3 id="11-executable-intermediate-target">1.1 Executable intermediate target<a class="headerlink" href="#11-executable-intermediate-target" title="Permanent link">&para;</a></h3>
+<p>Phase 2 is intentionally a bridge, not the final convergence cut.</p>
+<p>This phase must be implementable by:</p>
+<ul>
+<li>splitting authority-local indexing from backing-local truth,</li>
+<li>introducing one shared lifecycle-kernel API surface for mint and release,</li>
+<li>reusing existing lifecycle owners behind that API where appropriate, including:</li>
+<li><code>SessionLifecycleManager</code> use leases,</li>
+<li><code>HandleLeaseRegistry</code> handle leases,</li>
+<li><code>PayloadTransportBroker</code> payload records and tokens,</li>
+<li><code>RetentionRegistry</code> or persistence-backed control references when policy-backed visibility is added.</li>
+</ul>
+<p>This phase does <strong>not</strong> require every existing lease or token system to collapse into one physical storage table
+immediately. It does require one shared semantic mint/release contract over them.</p>
+<h3 id="12-resolvedsourcecapability">1.2 <code>ResolvedSourceCapability</code><a class="headerlink" href="#12-resolvedsourcecapability" title="Permanent link">&para;</a></h3>
+<p>Phase 2 introduces one normalized bridge object between authority semantics and shared dataplane lowering.</p>
+<p><code>ResolvedSourceCapability</code> means:</p>
+<ul>
+<li>authority and lifecycle have already validated that a bounded serve or source-resolution promise may be used now,</li>
+<li>any owner-local admission transaction has already been converted into a cross-owner adopted protection,</li>
+<li>the result is now ready to be lowered into shared execution,</li>
+<li>but target-specific lowering has not happened yet.</li>
+</ul>
+<p>Minimum required fields:</p>
+<ul>
+<li><code>selection_identity</code></li>
+<li><code>verified_content_descriptor</code></li>
+<li><code>serving_capability</code></li>
+<li>optional <code>backing_identity</code></li>
+<li><code>source_kind</code></li>
+<li>one concrete source-resolution form that is immediately lowerable:</li>
+<li>loader-backed source,</li>
+<li><code>payload_ref</code>,</li>
+<li>local handle-backed source,</li>
+<li>copied-payload snapshot source.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>ResolvedSourceCapability</code> is not authority truth and is not persisted as the source of future claim or join answers.</li>
+<li><code>ResolvedSourceCapability</code> is not a public SDK routing primitive.</li>
+<li>Any distributed or routed path that will move bytes must first produce <code>ResolvedSourceCapability</code> before it lowers to
+   <code>ArtifactLoweringPlan</code> or a mechanically equivalent core-owned lowering object.</li>
+<li>Any restore, rematerialization, or policy-path repair required to make a source executable must happen before
+   <code>ResolvedSourceCapability</code> is returned.</li>
+<li>Paths that do not move bytes yet must return an explicit attach/resume handle rather than inventing an ad hoc partial
+   source result.</li>
+<li>A routed owner must not return a half-admitted or owner-private pre-execution state in place of <code>ResolvedSourceCapability</code>.</li>
+<li>In this phase, <code>ResolvedSourceCapability.serving_capability</code> is the canonical adopted-protection bridge compatible with
+   <code>0094</code> and <code>0100</code>.</li>
+</ol>
+<h2 id="2-backingidentity-and-replicakey">2. <code>BackingIdentity</code> and <code>ReplicaKey</code><a class="headerlink" href="#2-backingidentity-and-replicakey" title="Permanent link">&para;</a></h2>
+<h3 id="21-normative-definition">2.1 Normative definition<a class="headerlink" href="#21-normative-definition" title="Permanent link">&para;</a></h3>
+<p>Phase 2 defines <code>BackingIdentity</code> as the shared projection of the retained backing subject currently bound under routed
+authority.</p>
+<p><code>BackingIdentity</code> identifies the exact core subject used for lookup, observation, export, and retirement. It does <strong>not</strong>
+by itself guarantee a globally unique rematerialization instance across repeated retire and recreate cycles.</p>
+<p>For local retained backings, <code>BackingIdentity</code> must carry:</p>
+<ul>
+<li><code>physical_artifact_id</code>,</li>
+<li>the exact full <code>loading::ReplicaKey</code> that currently realizes that backing.</li>
+</ul>
+<p>Required invariant:</p>
+<ul>
+<li><code>backing_identity.physical_artifact_id == backing_identity.replica_key.artifact_id</code>.</li>
+</ul>
+<p>For routed retained byte bodies in this phase:</p>
+<ul>
+<li><code>backing_identity.replica_key.view_id</code> must be <code>nullopt</code>,</li>
+<li><code>backing_identity.replica_key.replica</code> must be <code>0</code>,</li>
+<li>the key must be the exact key used for core lookup, retirement, export, and reconciliation.</li>
+</ul>
+<h3 id="22-relationship-to-replicakey">2.2 Relationship to <code>ReplicaKey</code><a class="headerlink" href="#22-relationship-to-replicakey" title="Permanent link">&para;</a></h3>
+<p><code>ReplicaKey</code> remains the core/store subject identity.</p>
+<p><code>BackingIdentity</code> is not a competing identity system. It is the shared cross-layer projection of that exact core
+subject with the stable <code>physical_artifact_id</code> carried explicitly for cross-layer reasoning and projection.</p>
+<p>The relationship is therefore:</p>
+<table>
+<thead>
+<tr>
+<th>Concept</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ReplicaKey</code></td>
+<td>exact core/store subject used for readiness, export, retirement, and lookup</td>
+</tr>
+<tr>
+<td><code>BackingIdentity</code></td>
+<td>shared backing-truth projection that must carry that exact <code>ReplicaKey</code> plus <code>physical_artifact_id</code></td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li>No code may reconstruct backing identity from <code>{physical_artifact_id, device}</code> alone after this phase.</li>
+<li>Any code that needs to inspect or retire backing truth must use the full <code>ReplicaKey</code> carried by <code>BackingIdentity</code>.</li>
+<li><code>BackingIdentity</code> must not carry request-local fields, authority-local TTL, or lifecycle capability ids.</li>
+<li><code>BackingIdentity</code> may change while <code>ContentIdentity</code> stays the same.</li>
+<li><code>BackingIdentity</code> is a stable backing-subject identity, not a lifecycle-instance token.</li>
+</ol>
+<h3 id="23-why-the-current-physical_artifact_id-device-form-is-insufficient">2.3 Why the current <code>{physical_artifact_id, device}</code> form is insufficient<a class="headerlink" href="#23-why-the-current-physical_artifact_id-device-form-is-insufficient" title="Permanent link">&para;</a></h3>
+<p>The current form is too weak because:</p>
+<ul>
+<li>it drops the repository-wide subject key that all core lifecycle APIs already use,</li>
+<li>it invites accidental reconstruction of keys instead of carrying the exact key,</li>
+<li>it makes backing truth weaker than the existing <code>ReplicaKey</code> discipline already used elsewhere in the repository.</li>
+</ul>
+<p>Phase 2 therefore upgrades <code>BackingIdentity</code> to the full shared form instead of inventing another parallel locator.</p>
+<h3 id="24-stable-subject-identity-versus-binding-instance-generation">2.4 Stable subject identity versus binding instance generation<a class="headerlink" href="#24-stable-subject-identity-versus-binding-instance-generation" title="Permanent link">&para;</a></h3>
+<p>The repository already uses deterministic retained backing ids for byte bodies. That determinism is desirable for core
+lookup and observability, but it means <code>BackingIdentity</code> alone is not enough to distinguish every retire and
+rematerialize cycle of the same retained backing subject.</p>
+<p>Phase-2 executable rule:</p>
+<ul>
+<li><code>BackingIdentity</code> identifies the stable retained backing subject,</li>
+<li><code>BackingRecord</code> carries a monotonic <code>instance_generation</code> that distinguishes repeated bindings of that subject under
+  the current routed authority scope,</li>
+<li>any <code>ServingCapability</code> bound to a live backing must bind to both:</li>
+<li><code>BackingIdentity</code>,</li>
+<li><code>instance_generation</code>.</li>
+</ul>
+<p>Consequences:</p>
+<ol>
+<li>A same-identity rematerialization may rebind the existing <code>BackingRecord</code> in place by bumping <code>instance_generation</code>.</li>
+<li>Already minted capabilities survive because their lifecycle ownership is externalized through the lifecycle kernel,
+   not because the backing table keeps multiple records with the same key alive forever.</li>
+<li>Concurrent <code>active</code> and <code>superseded</code> records are required only when authority moves to a <strong>different</strong>
+   <code>BackingIdentity</code>.</li>
+</ol>
+<h2 id="3-authorityrecord-must-reference-backing-truth-explicitly">3. <code>AuthorityRecord</code> must reference backing truth explicitly<a class="headerlink" href="#3-authorityrecord-must-reference-backing-truth-explicitly" title="Permanent link">&para;</a></h2>
+<p>Phase 2 keeps <code>AuthorityRecord</code> as authority-local state, but extends it so the record can point at backing truth
+without owning it.</p>
+<p>Required authority-facing fields:</p>
+<ul>
+<li>route scope:</li>
+<li><code>shard_id</code>,</li>
+<li><code>lease_generation</code>,</li>
+<li><code>routing_epoch</code>,</li>
+<li><code>expires_at</code>,</li>
+<li>claim and visibility state:</li>
+<li><code>claim_state</code>,</li>
+<li><code>visibility_kind</code>,</li>
+<li>backing reference:</li>
+<li><code>retained_backing_identity</code>,</li>
+<li>optional policy visibility reference:</li>
+<li><code>policy_visibility_ref</code>,</li>
+<li>user-facing projection:</li>
+<li><code>visible</code>.</li>
+</ul>
+<p><code>retained_backing_identity</code> means:</p>
+<ul>
+<li>the claim currently owns this retained backing lineage as its authoritative local backing reference.</li>
+</ul>
+<p><code>policy_visibility_ref</code> means:</p>
+<ul>
+<li>the claim currently has a validated policy-backed rematerialization path that may restore or provide visibility under
+  the current routed authority scope.</li>
+</ul>
+<h3 id="31-policyvisibilityref">3.1 <code>PolicyVisibilityRef</code><a class="headerlink" href="#31-policyvisibilityref" title="Permanent link">&para;</a></h3>
+<p>Phase 2 introduces <code>PolicyVisibilityRef</code> as the authority-local reference to an actionable rematerialization path.</p>
+<p>Minimum required fields:</p>
+<ul>
+<li><code>path_id</code>,</li>
+<li><code>path_kind</code>,</li>
+<li>exact <code>verified_content_descriptor</code>,</li>
+<li><code>control_ref</code>,</li>
+<li><code>expires_at</code>.</li>
+</ul>
+<p>Meaning:</p>
+<ul>
+<li><code>path_id</code></li>
+<li>stable id for the current actionable path under this authority scope.</li>
+<li><code>path_kind</code></li>
+<li>which policy-backed family is being used, such as shared disk, remote stable, or another explicitly modeled
+    recoverable source.</li>
+<li><code>verified_content_descriptor</code></li>
+<li>the exact shared content descriptor the path is expected to rematerialize.</li>
+<li><code>control_ref</code></li>
+<li>the concrete control-plane or retention handle that proves the path is live now.</li>
+<li><code>expires_at</code></li>
+<li>the latest time this path may still be treated as actionable without revalidation.</li>
+</ul>
+<p>Path-family constraint in this phase:</p>
+<ul>
+<li><code>path_kind</code> must identify an independent rematerialization family such as shared disk, remote stable, or another
+  explicitly modeled recoverable source,</li>
+<li>pure local-stable retention of the same lost local backing does not qualify as a <code>policy_backed_path</code> by itself.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>PolicyVisibilityRef</code> is not the <code>StorePolicy</code> itself.</li>
+<li><code>PolicyVisibilityRef</code> is not a <code>ServingCapability</code>.</li>
+<li>A claim may become visible through <code>policy_backed_path</code> only while its <code>PolicyVisibilityRef</code> remains actionable.</li>
+<li><code>PolicyVisibilityRef</code> must carry the exact <code>VerifiedContentDescriptor</code>; weaker content anchors are forbidden here.</li>
+<li><code>control_ref</code> must resolve to concrete recoverable control-plane or retention truth that is live now.</li>
+<li>Configured <code>StorePolicy</code> or pure local-stable retention alone is not actionable policy visibility proof.</li>
+</ol>
+<p>Required invariants:</p>
+<table>
+<thead>
+<tr>
+<th>Authority shape</th>
+<th><code>retained_backing_identity</code></th>
+<th><code>policy_visibility_ref</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>claimed_visible</code> + <code>ready_backing</code></td>
+<td>required</td>
+<td>absent</td>
+</tr>
+<tr>
+<td><code>claimed_visible</code> + <code>policy_backed_path</code></td>
+<td>optional</td>
+<td>required</td>
+</tr>
+<tr>
+<td><code>claimed_invisible</code> + <code>none</code></td>
+<td>optional</td>
+<td>absent</td>
+</tr>
+<tr>
+<td><code>claim_deleted</code> + <code>none</code></td>
+<td>absent</td>
+<td>absent</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>AuthorityRecord</code> must not embed <code>BodyHandle</code> or any other lifecycle-carrier object as truth.</li>
+<li><code>AuthorityRecord</code> may reference backing truth, but must not inline backing observation or export state as if it were
+   authoritative.</li>
+<li><code>AuthorityRecord</code> must not persist <code>ServingCapability</code>.</li>
+</ol>
+<h2 id="4-bodystore-stays-an-authority-index-and-points-to-backing-truth">4. <code>BodyStore</code> stays an authority index and points to backing truth<a class="headerlink" href="#4-bodystore-stays-an-authority-index-and-points-to-backing-truth" title="Permanent link">&para;</a></h2>
+<p>Phase 2 keeps <code>BodyStore</code> as an authority-local module, but splits its logical content into two layers.</p>
+<h3 id="41-required-logical-tables">4.1 Required logical tables<a class="headerlink" href="#41-required-logical-tables" title="Permanent link">&para;</a></h3>
+<p><code>BodyStore</code> now has two logical maps:</p>
+<ul>
+<li>authority index:</li>
+<li><code>artifact_id -&gt; AuthorityRecord</code> plus claim-scoped content projection,</li>
+<li>backing truth cache:</li>
+<li><code>BackingIdentity -&gt; BackingRecord</code>.</li>
+</ul>
+<p><code>BackingRecord</code> is the local retained-backing truth object.</p>
+<p>Required fields:</p>
+<ul>
+<li><code>BackingIdentity identity</code>,</li>
+<li><code>std::uint64_t instance_generation</code>,</li>
+<li><code>VerifiedContentDescriptor verified_content_descriptor</code>,</li>
+<li><code>VerificationRecord verification_record</code>,</li>
+<li><code>BodyDescriptor</code> as a projection only,</li>
+<li><code>BodyBackingObservation last_observation</code>,</li>
+<li><code>BodyHandle retained_body_handle</code>,</li>
+<li><code>BackingLifecycleState lifecycle_state</code>.</li>
+</ul>
+<p><code>BodyDescriptor</code> remains a projection from:</p>
+<ul>
+<li>shared content truth,</li>
+<li><code>BackingIdentity</code>.</li>
+</ul>
+<p>It must not become a second truth family beside <code>VerifiedContentDescriptor</code>.</p>
+<p><code>retained_body_handle</code> is permitted in <code>BackingRecord</code> in this phase as an implementation-local reference into
+core-owned state. It is:</p>
+<ul>
+<li>not authority truth,</li>
+<li>not a serving capability,</li>
+<li>not a substitute for lifecycle ownership.</li>
+</ul>
+<h3 id="42-required-access-path">4.2 Required access path<a class="headerlink" href="#42-required-access-path" title="Permanent link">&para;</a></h3>
+<p>The authority read path becomes:</p>
+<ol>
+<li><code>artifact_id -&gt; AuthorityRecord</code>,</li>
+<li>validate route scope and claim state,</li>
+<li>inspect <code>visibility_kind</code>:</li>
+<li><code>ready_backing</code>: resolve <code>retained_backing_identity -&gt; BackingRecord -&gt; core backing truth</code>,</li>
+<li><code>policy_backed_path</code>: resolve <code>policy_visibility_ref</code> through the lifecycle kernel,</li>
+<li><code>none</code>: return invisible or <code>MISS</code>,</li>
+<li>lifecycle kernel mints <code>ServingCapability</code>,</li>
+<li>capability resolution yields loader, local handle path, or remote source.</li>
+</ol>
+<p>The authority index therefore answers:</p>
+<ul>
+<li>should this claim currently be treated as visible,</li>
+<li>which backing or policy path future serving must bind to.</li>
+</ul>
+<p>The backing table answers:</p>
+<ul>
+<li>what the current retained backing actually is,</li>
+<li>what exact core subject realizes it,</li>
+<li>what its latest observation and lifecycle state are.</li>
+</ul>
+<h3 id="43-consequence-for-current-code">4.3 Consequence for current code<a class="headerlink" href="#43-consequence-for-current-code" title="Permanent link">&para;</a></h3>
+<p>Current <code>AuthorityEntry.visible_body_handle</code> is a phase-0 shortcut.</p>
+<p>Phase 2 replaces that shortcut with:</p>
+<ul>
+<li>explicit <code>retained_backing_identity</code> on authority state,</li>
+<li>explicit <code>BackingRecord</code> ownership in the backing table.</li>
+</ul>
+<p>That split is the core architectural correction in this phase.</p>
+<h2 id="5-backing-lifecycle-state-machine">5. Backing lifecycle state machine<a class="headerlink" href="#5-backing-lifecycle-state-machine" title="Permanent link">&para;</a></h2>
+<p>Phase 2 introduces a backing-local state machine distinct from the routed claim-state machine of <code>0090</code>.</p>
+<p>This state machine is record-scoped, not capability-scoped. For repeated rematerialization of the <strong>same</strong>
+<code>BackingIdentity</code>, the record may advance by bumping <code>instance_generation</code> in place rather than by minting a second
+record with the same key.</p>
+<p>Required states:</p>
+<ul>
+<li><code>active</code></li>
+<li>authoritative retained backing for the current claim and eligible to prove <code>ready_backing</code>.</li>
+<li><code>invalidated</code></li>
+<li>claim still owns the backing lineage, but the current live backing is unreadable, mismatched, or otherwise not
+    acceptable as visibility proof.</li>
+<li><code>superseded</code></li>
+<li>the claim has rebound to a different retained backing; this backing is no longer authoritative for future serving.</li>
+<li><code>draining</code></li>
+<li>the backing no longer has authority ownership, but outstanding lifecycle capabilities may still be using it.</li>
+<li><code>retired</code></li>
+<li>no authority ownership and no outstanding lifecycle capabilities remain; cleanup may erase the record.</li>
+</ul>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; active
+  active --&gt; invalidated: backing unreadable&lt;br&gt;size mismatch&lt;br&gt;core retire or eviction
+  active --&gt; superseded: replacement binds new backing
+  invalidated --&gt; active: backing restored or rematerialized
+  invalidated --&gt; superseded: replacement binds new backing
+  active --&gt; draining: claim loss or explicit retire
+  invalidated --&gt; draining: claim loss or explicit retire
+  superseded --&gt; draining: no authority ref remains
+  draining --&gt; retired: lifecycle capabilities drained</code></pre>
+<h3 id="51-event-semantics">5.1 Event semantics<a class="headerlink" href="#51-event-semantics" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Event</th>
+<th>Authority effect</th>
+<th>Backing effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>successful create</td>
+<td><code>unclaimed -&gt; claimed_visible</code></td>
+<td>new backing enters <code>active</code></td>
+</tr>
+<tr>
+<td>backing unreadable</td>
+<td><code>claimed_visible -&gt; claimed_invisible</code> unless policy path is installed</td>
+<td>backing enters <code>invalidated</code></td>
+</tr>
+<tr>
+<td>replacement with join-equivalent content and same <code>BackingIdentity</code></td>
+<td>claim remains claimed</td>
+<td>same record bumps <code>instance_generation</code> and enters or remains <code>active</code>; old capabilities drain through lifecycle ownership</td>
+</tr>
+<tr>
+<td>replacement with join-equivalent content and different <code>BackingIdentity</code></td>
+<td>claim remains claimed</td>
+<td>old backing <code>active/invalidated -&gt; superseded</code>, new backing enters <code>active</code></td>
+</tr>
+<tr>
+<td>policy-backed path installed</td>
+<td><code>claimed_invisible -&gt; claimed_visible</code> or <code>claimed_visible</code> stays visible</td>
+<td>current invalidated backing may remain <code>invalidated</code>; no new active local backing required yet</td>
+</tr>
+<tr>
+<td>explicit claim deletion or TTL expiry</td>
+<td><code>claimed_visible/claimed_invisible -&gt; claim_deleted</code></td>
+<td>authoritative backing enters <code>draining</code></td>
+</tr>
+<tr>
+<td>route mismatch on a single request</td>
+<td>no mutation by itself</td>
+<td>no mutation by itself</td>
+</tr>
+<tr>
+<td>lifecycle drain complete</td>
+<td>no authority effect</td>
+<td><code>draining -&gt; retired</code></td>
+</tr>
+</tbody>
+</table>
+<h3 id="52-claim-loss-versus-backing-invalidation">5.2 Claim loss versus backing invalidation<a class="headerlink" href="#52-claim-loss-versus-backing-invalidation" title="Permanent link">&para;</a></h3>
+<p>These are different events and must stay different:</p>
+<ul>
+<li>backing invalidation means the current local backing is no longer a valid visibility proof,</li>
+<li>claim loss means the authority no longer owns the claim for future semantic decisions.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>Backing invalidation must not silently erase claim truth.</li>
+<li>Claim loss must remove future authority ownership even if old serving capabilities are still draining.</li>
+<li>Replacement must never silently change content truth. A replacement is legal only when the claim remains
+   join-equivalent to the same shared verified content.</li>
+</ol>
+<h2 id="6-servingcapability-and-the-lifecycle-kernel">6. <code>ServingCapability</code> and the lifecycle kernel<a class="headerlink" href="#6-servingcapability-and-the-lifecycle-kernel" title="Permanent link">&para;</a></h2>
+<p>Phase 2 makes <code>ServingCapability</code> the real shared lifecycle contract promised by <code>0092</code>.</p>
+<h3 id="61-what-servingcapability-means">6.1 What <code>ServingCapability</code> means<a class="headerlink" href="#61-what-servingcapability-means" title="Permanent link">&para;</a></h3>
+<p><code>ServingCapability</code> is the bounded promise that a specific consumer path may:</p>
+<ul>
+<li>serve bytes,</li>
+<li>resolve a loader or source,</li>
+<li>resolve a local zero-copy handle,</li>
+<li>resolve a remote source,</li>
+<li>or resolve a policy-backed rematerialization path,</li>
+</ul>
+<p>for a limited lifetime.</p>
+<p>It is not:</p>
+<ul>
+<li>claim truth,</li>
+<li>backing truth,</li>
+<li>content truth,</li>
+<li>a stored authority field.</li>
+</ul>
+<h3 id="62-required-fields">6.2 Required fields<a class="headerlink" href="#62-required-fields" title="Permanent link">&para;</a></h3>
+<p>Minimum required fields:</p>
+<ul>
+<li><code>capability_id</code>,</li>
+<li><code>expires_at</code>,</li>
+<li><code>mode</code>,</li>
+<li><code>local</code>,</li>
+<li><code>subject_kind</code>,</li>
+<li><code>lifecycle_owner_ref</code>,</li>
+<li><code>backing_identity</code> and <code>backing_instance_generation</code> when the subject is a live backing,</li>
+<li><code>policy_visibility_ref</code> when the subject is a policy-backed path.</li>
+</ul>
+<p><code>subject_kind</code> must distinguish at least:</p>
+<ul>
+<li><code>backing</code>,</li>
+<li><code>copied_payload</code>,</li>
+<li><code>policy_backed_path</code>.</li>
+</ul>
+<h3 id="63-lifecycleownerref">6.3 <code>LifecycleOwnerRef</code><a class="headerlink" href="#63-lifecycleownerref" title="Permanent link">&para;</a></h3>
+<p>Phase 2 does not require one brand-new physical registry for every capability.</p>
+<p>Instead, each <code>ServingCapability</code> must name exactly one lifecycle owner plus one release path.</p>
+<p>Minimum required fields:</p>
+<ul>
+<li><code>owner_kind</code>,</li>
+<li><code>owner_id</code>.</li>
+</ul>
+<p><code>owner_kind</code> may initially project existing owners such as:</p>
+<ul>
+<li><code>session_use_lease</code>,</li>
+<li><code>handle_lease_token</code>,</li>
+<li><code>payload_ref_token</code>,</li>
+<li><code>inline_copy_window</code>,</li>
+<li><code>retention_handle</code>.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>Every minted <code>ServingCapability</code> must terminate in exactly one concrete lifecycle owner.</li>
+<li>Existing registries may remain physically separate in this phase, but mint and release must terminate in one shared
+   lifecycle-kernel API.</li>
+<li><code>capability_id</code> is the consumer-facing capability identifier; <code>owner_id</code> is the underlying lifecycle owner reference,
+   and they may differ.</li>
+</ol>
+<h3 id="64-lifecycle-kernel-ownership">6.4 Lifecycle-kernel ownership<a class="headerlink" href="#64-lifecycle-kernel-ownership" title="Permanent link">&para;</a></h3>
+<p>The lifecycle kernel is responsible for:</p>
+<ul>
+<li>validating that a capability may be minted under the current routed authority scope,</li>
+<li>binding the capability either to a live backing or to a policy-backed path,</li>
+<li>adapting to the concrete existing lifecycle owner used in this phase,</li>
+<li>acquiring the lease, pin, finalizer, or other bounded lifecycle ownership needed for that promise,</li>
+<li>producing <code>ResolvedSourceCapability</code>,</li>
+<li>releasing the backing once the capability expires or is explicitly released.</li>
+</ul>
+<p>Executable phase-2 target:</p>
+<ul>
+<li><code>SessionLifecycleManager</code>, <code>HandleLeaseRegistry</code>, <code>PayloadTransportBroker</code>, and <code>RetentionRegistry</code> may remain the
+  physical owners of their current records,</li>
+<li>but the daemon must expose one shared lifecycle-kernel mint and release contract over them.</li>
+</ul>
+<h3 id="65-required-rule-on-minting">6.5 Required rule on minting<a class="headerlink" href="#65-required-rule-on-minting" title="Permanent link">&para;</a></h3>
+<p><code>ServingCapability</code> must be minted by the lifecycle kernel, not by <code>BodyStore</code>.</p>
+<p>That means:</p>
+<ul>
+<li><code>BodyStore::get(...)</code> may return authority and backing snapshots,</li>
+<li>the get path must then ask the lifecycle kernel to mint a capability and project <code>ResolvedSourceCapability</code>,</li>
+<li><code>PayloadTransportBroker</code> must consume the same kernel instead of being a second capability owner,</li>
+<li><code>PayloadTransportBroker</code> may remain the physical holder of payload records in this phase, but not a second semantic
+  lifecycle system,</li>
+<li>future CPU memfd, CUDA IPC, publish, or retention capability front doors must also use the same kernel.</li>
+</ul>
+<h3 id="66-survival-across-replacement-invalidation-and-claim-loss">6.6 Survival across replacement, invalidation, and claim loss<a class="headerlink" href="#66-survival-across-replacement-invalidation-and-claim-loss" title="Permanent link">&para;</a></h3>
+<p>Normative rules:</p>
+<ol>
+<li>Once minted, a <code>ServingCapability</code> may survive authority visibility loss or route handoff up to its promised expiry,
+   provided the lifecycle kernel already acquired the necessary backing ownership.</li>
+<li>Replacement or invalidation affects future capability minting, not already issued capabilities.</li>
+<li>Claim deletion or route handoff must stop minting new capabilities under the old authority scope.</li>
+<li>Old capabilities must drain through the lifecycle kernel; <code>BodyStore</code> must not become their hidden owner.</li>
+<li>A capability bound to a live backing must bind to <code>{BackingIdentity, instance_generation}</code> rather than to
+   <code>BackingIdentity</code> alone.</li>
+</ol>
+<h2 id="7-high-cardinality-artifacts-become-real-storepolicy-clients">7. High-cardinality artifacts become real <code>StorePolicy</code> clients<a class="headerlink" href="#7-high-cardinality-artifacts-become-real-storepolicy-clients" title="Permanent link">&para;</a></h2>
+<h3 id="71-bodybackingintent-remains-derived-not-declarative">7.1 <code>BodyBackingIntent</code> remains derived, not declarative<a class="headerlink" href="#71-bodybackingintent-remains-derived-not-declarative" title="Permanent link">&para;</a></h3>
+<p><code>BodyBackingIntent</code> stays an internal lowering hint only.</p>
+<p>But Phase 2 defines the real derivation inputs explicitly.</p>
+<p>Required derivation inputs:</p>
+<ul>
+<li>resolved <code>StorePolicy</code>,</li>
+<li>route role,</li>
+<li>locality,</li>
+<li>access pattern,</li>
+<li>object shape hints when they affect the access pattern classification.</li>
+</ul>
+<p>Recommended normalized input carrier:</p>
+<div class="language-cpp highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">struct</span><span class="w"> </span><span class="nc">BodyPlacementContext</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="n">RouteRole</span><span class="w"> </span><span class="n">route_role</span><span class="p">;</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="n">BodyConsumerLocality</span><span class="w"> </span><span class="n">locality</span><span class="p">;</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="n">BodyAccessPattern</span><span class="w"> </span><span class="n">access_pattern</span><span class="p">;</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">size_bytes</span><span class="p">;</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">expected_fanout</span><span class="p">;</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">};</span>
+</span></code></pre></div>
+<p><code>BodyAccessClass</code> may remain as a convenience adapter, but it is no longer the authoritative derivation input by
+itself. It must normalize into the richer placement context first.</p>
+<h3 id="72-required-derivation-rules">7.2 Required derivation rules<a class="headerlink" href="#72-required-derivation-rules" title="Permanent link">&para;</a></h3>
+<p>The derivation must follow these rules:</p>
+<table>
+<thead>
+<tr>
+<th>Input dimension</th>
+<th>Required effect</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>StorePolicy</code> local stable requirement</td>
+<td>drives <code>stable_retention_requirement</code></td>
+</tr>
+<tr>
+<td><code>StorePolicy</code> durability or persistence path</td>
+<td>decides whether policy-backed rematerialization may exist at all</td>
+</tr>
+<tr>
+<td>actionable persistence or retention proof</td>
+<td>required before policy-backed visibility may actually be installed</td>
+</tr>
+<tr>
+<td>route role <code>transient_forwarder</code></td>
+<td>forces ephemeral retention and forbids visibility from pretending the forwarder owns long-lived retained truth</td>
+</tr>
+<tr>
+<td>locality <code>local_only</code></td>
+<td>may choose <code>LOCAL_READ_MOSTLY</code> or <code>PRIVATE_LOCAL</code></td>
+</tr>
+<tr>
+<td>locality <code>remote_or_mixed</code></td>
+<td>must prefer <code>REMOTE_SHAREABLE</code></td>
+</tr>
+<tr>
+<td>access pattern <code>local_gpu_hot</code></td>
+<td>may prefer GPU residency if policy does not require a conflicting stable-local backing path</td>
+</tr>
+<tr>
+<td>access pattern <code>small_object</code></td>
+<td>may remain CPU-private or CPU-local unless policy explicitly requires a retained path</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li>Route role may constrain intent, but may not invent a second policy surface.</li>
+<li>Locality may influence sharing and residency, but may not silently override <code>StorePolicy</code> correctness requirements.</li>
+<li>Access pattern may shape residency and sharing, but may not erase a required durable or rematerializable path.</li>
+<li>A durable <code>StorePolicy</code> is necessary but not sufficient for <code>policy_backed_path</code>; a concrete actionable proof must
+   also exist.</li>
+</ol>
+<h2 id="8-when-policy-backed-rematerialization-restores-visibility">8. When policy-backed rematerialization restores visibility<a class="headerlink" href="#8-when-policy-backed-rematerialization-restores-visibility" title="Permanent link">&para;</a></h2>
+<p>Phase 0 reserved <code>policy_backed_path</code>.</p>
+<p>Phase 2 defines when it is allowed to make a routed claim visible again.</p>
+<h3 id="80-executable-phase-2-scope">8.0 Executable phase-2 scope<a class="headerlink" href="#80-executable-phase-2-scope" title="Permanent link">&para;</a></h3>
+<p>To keep Phase 2 executable, the first supported <code>policy_backed_path</code> families may be limited to path kinds that already
+have explicit recoverable control-plane truth, such as:</p>
+<ul>
+<li>shared-disk persistence state,</li>
+<li>remote-stable persistence or retention state.</li>
+</ul>
+<p>Pure local-stable retention of the same lost local backing is not enough.</p>
+<h3 id="81-storepolicy-alone-is-not-enough">8.1 <code>StorePolicy</code> alone is not enough<a class="headerlink" href="#81-storepolicy-alone-is-not-enough" title="Permanent link">&para;</a></h3>
+<p>The existence of a <code>StorePolicy</code> object does not make a claim visible.</p>
+<p><code>claimed_invisible -&gt; claimed_visible</code> is allowed only when the authority installs a live <code>policy_visibility_ref</code>.</p>
+<p>That requires all of the following:</p>
+<ol>
+<li>the claim is still owned under the current route fence and is not <code>claim_deleted</code>,</li>
+<li>the resolved <code>StorePolicy</code> plus current persistence or retention truth provides an independent rematerialization path
+   that is still live under current control-plane truth,</li>
+<li>the rematerialization path is expected to produce the same <code>VerifiedContentDescriptor</code> as the claim,</li>
+<li>the lifecycle kernel can mint a bounded <code>ServingCapability</code> from that path,</li>
+<li>the path is not merely “configured in principle” but is current and actionable now.</li>
+</ol>
+<h3 id="82-visibility-transitions">8.2 Visibility transitions<a class="headerlink" href="#82-visibility-transitions" title="Permanent link">&para;</a></h3>
+<p>Policy-backed rematerialization introduces these legal transitions:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["claimed_visible&lt;br&gt;ready_backing"] --&gt;|backing lost, no policy path| B["claimed_invisible&lt;br&gt;none"]
+  A --&gt;|backing lost, policy path installed| C["claimed_visible&lt;br&gt;policy_backed_path"]
+  B --&gt;|policy path installed| C
+  C --&gt;|materialize new backing| A
+  C --&gt;|policy path lost| B</code></pre>
+<p>Semantics:</p>
+<ul>
+<li><code>claimed_visible + ready_backing</code></li>
+<li>visible because a readable live backing exists now.</li>
+<li><code>claimed_visible + policy_backed_path</code></li>
+<li>visible because the authority has a validated policy-backed path that can still be turned into a serving
+    capability under the current routed scope.</li>
+<li><code>claimed_invisible + none</code></li>
+<li>no current live backing and no current actionable policy-backed path.</li>
+</ul>
+<h3 id="83-hard-limits">8.3 Hard limits<a class="headerlink" href="#83-hard-limits" title="Permanent link">&para;</a></h3>
+<ol>
+<li><code>claim_deleted</code> must never be resurrected by policy-backed rematerialization.</li>
+<li>A policy-backed path may restore visibility only for a still-owned, not-deleted claim.</li>
+<li>If the policy-backed path resolves to content that does not match the claim's <code>VerifiedContentDescriptor</code>, the
+   outcome is corruption or conflict, not restoration.</li>
+<li>A policy-backed path does not by itself mint a permanent new backing. It only authorizes visibility once the
+   lifecycle kernel can bind it to a bounded serving result.</li>
+<li>Pure local-stable retention of the same lost local backing is not a legal <code>policy_backed_path</code>.</li>
+</ol>
+<h2 id="9-naming-compliance">9. Naming Compliance<a class="headerlink" href="#9-naming-compliance" title="Permanent link">&para;</a></h2>
+<p>Planned interface names introduced or clarified by this phase:</p>
+<table>
+<thead>
+<tr>
+<th>Interface</th>
+<th>Language</th>
+<th>Rule</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>BackingIdentity</code></td>
+<td>C++/Python type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BackingRecord</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BackingLifecycleState</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PolicyVisibilityRef</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>ServingCapability</code></td>
+<td>C++/Python type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>LifecycleOwnerRef</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyPlacementContext</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyConsumerLocality</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>BodyAccessPattern</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>derive_body_backing_intent</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>mint_serving_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>release_serving_capability</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>reconcile_backing_record</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>No persistent schema changes are required for Phase 2.</p>
+<p>This phase changes:</p>
+<ul>
+<li>shared in-memory truth and lifecycle contracts,</li>
+<li>daemon authority and backing layering,</li>
+<li>routed high-cardinality policy semantics,</li>
+<li>the internal minting and ownership model for serving capability.</li>
+</ul>
+<h1 id="recoverability-boundary">Recoverability Boundary<a class="headerlink" href="#recoverability-boundary" title="Permanent link">&para;</a></h1>
+<p>Phase 2 keeps the phase-0 routed authority recovery line from <code>0090</code>.</p>
+<p>It therefore distinguishes durable source truth from daemon-local projections:</p>
+<table>
+<thead>
+<tr>
+<th>Object</th>
+<th>Owner</th>
+<th>Recoverability in this phase</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>AuthorityRecord</code></td>
+<td>routed home-daemon authority</td>
+<td>not recovered across daemon restart or route failover beyond <code>0090</code>; recomputed only for live in-process authority</td>
+</tr>
+<tr>
+<td><code>BackingRecord</code></td>
+<td>daemon-local backing registry over core runtime</td>
+<td>not durably persisted; may be rebuilt from current authority and core state while the process lives; lost on restart</td>
+</tr>
+<tr>
+<td><code>PolicyVisibilityRef</code></td>
+<td>daemon-local projection from persistence, retention, or other control-plane truth</td>
+<td>the record itself is ephemeral; after restart or handoff it must be revalidated and reinstalled from recoverable source truth or remain absent</td>
+</tr>
+<tr>
+<td><code>ServingCapability</code></td>
+<td>lifecycle owner state</td>
+<td>never recovered; issued capabilities drain or expire only within the current daemon process</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li>No daemon-local map introduced by this phase may silently become restart-recoverable semantic truth.</li>
+<li>Any future phase that wants restart-surviving routed authority or capability state must add an explicit recovered
+   index or handoff log.</li>
+<li><code>PolicyVisibilityRef</code> may only cite control refs that themselves survive or can be revalidated from the owning
+   subsystem.</li>
+</ol>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Splitting <code>BodyStore</code> into authority and backing layers introduces more named state.
+  That is intentional. The current single-map shape is smaller in code but larger in ambiguity.</li>
+<li>Upgrading <code>BackingIdentity</code> to carry the full <code>ReplicaKey</code> creates more churn in shared types.
+  That churn is required because the repository already treats exact <code>ReplicaKey</code> identity as the only safe lifecycle
+  subject.</li>
+<li>Keeping <code>BackingIdentity</code> as a stable backing-subject identity while adding <code>instance_generation</code> is a deliberate
+  compromise.
+  It makes Phase 2 implementable without pretending the current deterministic retained backing ids are per-instance
+  unique.</li>
+<li>Making <code>ServingCapability</code> lifecycle-owned may temporarily widen the diff because multiple front doors currently mint
+  capability-shaped objects independently.
+  That is still preferable to letting each front door harden its own hidden lifecycle contract.</li>
+<li>Reusing existing lease and token registries behind one lifecycle-kernel API is intentionally incremental.
+  It avoids a greenfield registry rewrite while still stopping semantic divergence at the API boundary.</li>
+<li>Allowing <code>policy_backed_path</code> to restore visibility is powerful.
+  The guardrail is strict: configured policy alone is not enough; the path must be current, content-matching, and
+  capable of minting a bounded serving result now.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>This is a hard-cut internal contract clarification. No compatibility shim should preserve the old ambiguous shapes as a
+second long-term line.</p>
+<p>Acceptance criteria:</p>
+<ul>
+<li><code>BackingIdentity</code> carries the exact full <code>ReplicaKey</code> of the live retained backing it describes,</li>
+<li>the invariant <code>physical_artifact_id == replica_key.artifact_id</code> is explicit and enforced,</li>
+<li><code>BackingIdentity</code> is explicitly documented as stable backing-subject identity rather than as a per-instance unique
+  token,</li>
+<li><code>BackingRecord</code> carries <code>instance_generation</code> or an equivalent monotonic binding generation for repeated bindings of
+  the same <code>BackingIdentity</code>,</li>
+<li><code>AuthorityRecord</code> explicitly references backing truth and no longer relies on embedded <code>BodyHandle</code> ownership,</li>
+<li><code>BodyStore</code> is documented and implemented as:</li>
+<li>an authority index over claims and visibility,</li>
+<li>plus a backing-truth table keyed by <code>BackingIdentity</code>,</li>
+<li>the backing lifecycle state machine explicitly distinguishes:</li>
+<li>invalidation,</li>
+<li>replacement,</li>
+<li>draining after claim loss,</li>
+<li>final retirement,</li>
+<li><code>ServingCapability</code> is minted only by the lifecycle kernel and is not stored as authority truth,</li>
+<li><code>ResolvedSourceCapability</code> is the required bridge from authority/lifecycle success to shared lowering for any path that
+  will move bytes,</li>
+<li><code>ResolvedSourceCapability</code> carries the adopted protection that crosses owner boundaries; owner-local admission state does
+  not,</li>
+<li><code>ServingCapability</code> binds to an explicit <code>lifecycle_owner_ref</code> and supports at least:</li>
+<li><code>backing</code>,</li>
+<li><code>copied_payload</code>,</li>
+<li><code>policy_backed_path</code>,</li>
+<li><code>HomeBatchGet</code>, <code>payload_ref</code>, and future local or remote capability front doors share the same lifecycle contract,</li>
+<li><code>BodyBackingIntent</code> derivation is defined in terms of <code>StorePolicy</code>, route role, locality, and access pattern rather
+  than only in terms of body-local enums,</li>
+<li><code>claimed_invisible -&gt; claimed_visible</code> under policy-backed rematerialization occurs only when a live actionable
+  <code>policy_visibility_ref</code> exists and the lifecycle kernel can mint a bounded serving result,</li>
+<li><code>PolicyVisibilityRef</code> carries the exact <code>VerifiedContentDescriptor</code> and does not treat pure local-stable retention as
+  an actionable rematerialization path,</li>
+<li><code>claim_deleted</code> cannot be resurrected by policy-backed rematerialization,</li>
+<li>the recoverability boundary for <code>AuthorityRecord</code>, <code>BackingRecord</code>, <code>PolicyVisibilityRef</code>, and <code>ServingCapability</code> is
+  explicit and matches <code>0090</code> / <code>0092</code>,</li>
+<li>no implementation is accepted if it:</li>
+<li>reintroduces <code>BodyStore</code> as a hidden lifecycle owner,</li>
+<li>keeps <code>ServingCapability</code> as a response-only convenience object with no lifecycle owner,</li>
+<li>treats configured <code>StorePolicy</code> alone as sufficient proof of visibility,</li>
+<li>reconstructs backing identity from <code>{physical_artifact_id, device}</code> instead of carrying the exact <code>ReplicaKey</code>,</li>
+<li>binds live-backing capabilities to <code>BackingIdentity</code> alone without distinguishing repeated bindings of the same
+    backing subject.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

@@ -1,0 +1,3144 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/plans/0122-process-scoped-region-backed-artifact-session/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Process-Scoped Region-Backed Artifact Session Implementation Plan - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#objective" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Process-Scoped Region-Backed Artifact Session Implementation Plan
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../designs/" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../designs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="objective">Objective<a class="headerlink" href="#objective" title="Permanent link">&para;</a></h1>
+<p>Implement design <code>0122</code> as an additive Python SDK surface that lets one caller
+process attach to one ready, node-local StoreDaemon and use process-pinned
+host-shared regions for batched byte-artifact <code>exists</code>, <code>get_into</code>, and
+<code>put_from</code> operations.</p>
+<p>The implementation must deliver both initial transfer modes:</p>
+<ul>
+<li>fixed-capacity, direction-specific scratch arenas; and</li>
+<li>allocator-backed caller-side direct transfer across one or more live regions.</li>
+</ul>
+<p>The SDK owns artifact identity lowering, region registration and attachment,
+multi-storage layouts, slot wire tokens, message-size admission, response
+validation, sticky RPC health, and process-session lifecycle. External callers
+must not construct generated protobuf messages or use <code>DaemonCtl</code> directly.</p>
+<p>This plan is execution-oriented. Every phase adds focused unit coverage and has
+an explicit validation gate. A phase is not complete until its gate passes.</p>
+<h1 id="starting-state-grounding">Starting State &amp; Grounding<a class="headerlink" href="#starting-state-grounding" title="Permanent link">&para;</a></h1>
+<p>The repository already provides the daemon and wire primitives required by
+<code>0122</code>:</p>
+<ul>
+<li><code>tensorcast/daemon_ctl.py</code> provides:</li>
+<li>StoreDaemon channel construction and refresh;</li>
+<li><code>BatchExists</code>, <code>BatchGetIntoRegion</code>, and
+    <code>BatchPutIfAbsentFromRegion</code> wrappers;</li>
+<li>host-shared region registration, attachment, release, and unregister
+    helpers; and</li>
+<li>validated client gRPC maximum send/receive environment settings.</li>
+<li><code>tensorcast/common/identity.py</code> provides
+  <code>build_byte_artifact_cgid()</code>.</li>
+<li><code>tensorcast/common/selection_contract.py</code> provides canonical byte-artifact
+  selection construction.</li>
+<li>the current daemon protobuf already carries multi-storage <code>TargetLayout</code>,
+  region offsets, slot index/generation tokens, per-item outcomes, and
+  layout-and-size-only put invariants.</li>
+<li>daemon tests already cover host-shared region layouts, stable backing, and
+  batch-region operations.</li>
+</ul>
+<p>The missing layer is the public process-scoped SDK session and its internal
+compilation and lifecycle logic.</p>
+<p>Current <code>DaemonCtl</code> region get/put wrappers use one SDK retry by default.
+<code>0122</code> must preserve existing behavior for existing callers while giving the
+new Session an explicit zero-retry path. Current channel message limits are
+resolved while building channel options but are not retained as one explicit
+per-client immutable snapshot.</p>
+<h1 id="scope-and-constraints">Scope And Constraints<a class="headerlink" href="#scope-and-constraints" title="Permanent link">&para;</a></h1>
+<h2 id="in-scope">In scope<a class="headerlink" href="#in-scope" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Python SDK implementation of every public type and method in design <code>0122</code>.</li>
+<li>A concrete public attach-time exception, <code>RegionSessionAttachError</code>, so
+  pre-Session failures never leak raw gRPC exceptions.</li>
+<li>Minimal internal changes to <code>DaemonCtl</code> for:</li>
+<li>immutable effective message-limit snapshots;</li>
+<li>reuse of those limits across channel refresh; and</li>
+<li>explicit zero-retry region get/put invocation without changing existing
+    default behavior.</li>
+<li>Unit tests based on fake clients, generated protobuf fixtures, temporary
+  memfds, and fake CUDA mode.</li>
+<li>End-to-end Python acceptance tests against a prebuilt StoreDaemon binary.</li>
+<li>Public SDK exports and documentation.</li>
+</ul>
+<h2 id="out-of-scope">Out of scope<a class="headerlink" href="#out-of-scope" title="Permanent link">&para;</a></h2>
+<ul>
+<li>StoreDaemon C++ implementation changes.</li>
+<li>Protobuf or persistent-schema changes.</li>
+<li>Building the C++ daemon as part of this implementation plan. The validation
+  environment supplies a compatible prebuilt daemon.</li>
+<li>Building a Python native extension specifically for this feature. The Session
+  uses existing Python SDK and generated-protobuf facilities.</li>
+<li>Framework-specific cache, page, rank, model, or error-policy logic.</li>
+<li>Recovery of a failed or terminated Session in the same process.</li>
+<li>Runtime release of process-pinned regions before owner-process exit.</li>
+<li>Solving shared-channel refresh interference, process-ID reuse in diagnostic
+  region names, or post-attach fork/spawn behavior.</li>
+</ul>
+<h2 id="implementation-rules">Implementation rules<a class="headerlink" href="#implementation-rules" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Treat the <code>0122</code> design as normative. If implementation reveals a necessary
+  semantic change, update the design before changing the contract.</li>
+<li>Keep generated protobuf and <code>DaemonCtl</code> objects inside the SDK boundary.</li>
+<li>Prefer one new implementation module:
+  <code>tensorcast/api/store/region_backed_artifact_session.py</code>.
+  Extract a private helper module only if the implementation becomes materially
+  clearer; do not split public resource ownership across several Sessions.</li>
+<li>Preserve existing <code>DaemonCtl</code> defaults for all old call sites.</li>
+<li>Direct region get and put always invoke the underlying RPC with <code>retries=0</code>.</li>
+<li>Unit tests must not require a daemon process. Only the final end-to-end lane
+  may require <code>TENSORCAST_DAEMON_BIN</code> or the default
+  <code>bazel-bin/daemon/tensorcast_daemon</code>.</li>
+<li>Test-only registry reset/injection may be private and may operate only on fake
+  Sessions with no process-pinned production mapping. Do not add a public reset
+  API.</li>
+<li>Every Python command activates <code>.venv</code> and uses <code>uv</code>.</li>
+<li>Python tests select fake CUDA with <code>TENSORCAST_CUDA_BACKEND=fake</code>. Bazel uses
+  the equivalent <code>--test_env=TENSORCAST_CUDA_BACKEND=fake</code> spelling.</li>
+</ul>
+<h1 id="proposed-code-and-test-layout">Proposed Code And Test Layout<a class="headerlink" href="#proposed-code-and-test-layout" title="Permanent link">&para;</a></h1>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>tensorcast/
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>├── daemon_ctl.py
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>└── api/store/
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    ├── __init__.py
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    ├── README.md
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    └── region_backed_artifact_session.py
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>tests/python/
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>├── api/
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>│   ├── test_public_surface.py
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>│   └── test_region_backed_artifact_session.py
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>└── test_region_backed_artifact_session_e2e.py
+</span></code></pre></div>
+<p>The primary unit-test file is organized into stable test classes so each phase
+can run a narrow gate without proliferating small files:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>TestPublicContracts
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>TestGrpcMessageLimits
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>TestAttachRegistry
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>TestSessionState
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>TestHostMemorySpan
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>TestRegionAllocation
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>TestArtifactLowering
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>TestWireBudget
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>TestOutcomeValidation
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>TestScratchTransfer
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>TestAllocatorDirectTransfer
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>TestConcurrentAdmission
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>TestFailureContract
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>TestTerminationContract
+</span></code></pre></div>
+<h1 id="execution-order">Execution Order<a class="headerlink" href="#execution-order" title="Permanent link">&para;</a></h1>
+<p>Execute phases in this order. Do not begin a later phase while an earlier
+validation gate is red.</p>
+<ul>
+<li>[x] Phase 1: Public contracts and RPC primitives</li>
+<li>[x] Phase 2: Process attach, registry, and state admission</li>
+<li>[x] Phase 3: Host spans, region allocation, and pinned ownership</li>
+<li>[x] Phase 4: Artifact lowering, layouts, wire budget, and outcomes</li>
+<li>[x] Phase 5: Scratch transfer mode</li>
+<li>[x] Phase 6: Allocator-backed direct transfer mode</li>
+<li>[x] Phase 7: Failure hardening, daemon acceptance, and documentation closure</li>
+</ul>
+<h1 id="phases-milestones">Phases &amp; Milestones<a class="headerlink" href="#phases-milestones" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Phase 1</li>
+<li>[x] Public value/resource contracts are defined and validated in the new
+        leaf module.</li>
+<li>[x] <code>DaemonCtl</code> has one immutable effective message-limit snapshot.</li>
+<li>[x] direct region RPC wrappers can be called with zero SDK retries without
+        changing existing defaults.</li>
+<li>[x] Phase 2</li>
+<li>[x] one process attaches to at most one canonical daemon endpoint;</li>
+<li>[x] the simple registry mutex prevents duplicate concurrent construction;</li>
+<li>[x] sticky health and terminal lifecycle admission order is executable.</li>
+<li>[x] Phase 3</li>
+<li>[x] owned spans and allocator tensors keep backing memory alive;</li>
+<li>[x] multiple host-shared region records coexist and resolve safely;</li>
+<li>[x] only exact unexposed <code>Building</code> rollback releases a region.</li>
+<li>[x] Phase 4</li>
+<li>[x] callers' keyspaces and engine keys lower to canonical artifacts;</li>
+<li>[x] scratch and multi-region direct layouts are compiled internally;</li>
+<li>[x] payload limits, geometry, slot tokens, and outcomes are validated.</li>
+<li>[x] Phase 5</li>
+<li>[x] scratch put packs caller bytes and scratch get copies only successful
+        outcomes;</li>
+<li>[x] get and put arenas have independent direction locks.</li>
+<li>[x] Phase 6</li>
+<li>[x] direct get/put uses caller allocations without Session scratch copies;</li>
+<li>[x] one batch may span multiple allocator regions;</li>
+<li>[x] direct RPC retry and timeout contracts match <code>0122</code>.</li>
+<li>[x] Phase 7</li>
+<li>[x] every fatal class latches exactly one stable first failure;</li>
+<li>[x] termination and process-pinned retention are covered;</li>
+<li>[x] prebuilt-daemon acceptance and relevant daemon contract tests pass;</li>
+<li>[x] public docs and API-surface tests are complete.</li>
+</ul>
+<h1 id="detailed-plan">Detailed Plan<a class="headerlink" href="#detailed-plan" title="Permanent link">&para;</a></h1>
+<h2 id="phase-1-public-contracts-and-rpc-primitives">Phase 1: Public Contracts And RPC Primitives<a class="headerlink" href="#phase-1-public-contracts-and-rpc-primitives" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>establish the caller-visible vocabulary before stateful implementation;</li>
+<li>make RPC retry and payload-size behavior observable to the Session without
+  exposing transport details publicly.</li>
+</ul>
+<h3 id="implementation-tasks">Implementation tasks<a class="headerlink" href="#implementation-tasks" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Add <code>tensorcast/api/store/region_backed_artifact_session.py</code>.</li>
+<li>[x] Implement the frozen Pydantic and typed resource/result declarations from
+      design <code>0122</code>:</li>
+<li>[x] <code>RegionTransferMode</code>;</li>
+<li>[x] <code>RegionSessionHealth</code>;</li>
+<li>[x] <code>RegionSessionLifecycleState</code>;</li>
+<li>[x] <code>RegionSessionFailureCode</code>;</li>
+<li>[x] <code>RegionSessionOperationKind</code>;</li>
+<li>[x] <code>ByteArtifactKeyspace</code> and <code>ByteArtifactSpec</code>;</li>
+<li>[x] scratch/allocator transfer options and Session options;</li>
+<li>[x] <code>RegionArtifactTransfer</code>;</li>
+<li>[x] exists/transfer results; and</li>
+<li>[x] input, attach, failed, and terminated exceptions.</li>
+<li>[x] Give public Pydantic models <code>frozen=True</code> and <code>extra="forbid"</code>.</li>
+<li>[x] Reject empty identity fields, non-positive byte lengths, invalid timeout
+      values, and mode-incompatible configuration locally.</li>
+<li>[x] Keep canonical artifact IDs, protobufs, region handles, and wire enums out
+      of all public models.</li>
+<li>[x] Add a private frozen <code>_GrpcMessageLimits</code> value in <code>daemon_ctl.py</code>.</li>
+<li>[x] Resolve maximum send and receive bytes once in <code>DaemonCtl.__init__()</code>
+      through the existing validated environment/default functions.</li>
+<li>[x] Pass the snapshot into channel-option construction and reuse it in
+      <code>_refresh_channel()</code> rather than rereading environment variables.</li>
+<li>[x] Add a private read-only way for the Session implementation to obtain the
+      same snapshot.</li>
+<li>[x] Add a backwards-compatible internal retry parameter to region get/put
+      wrappers:</li>
+<li>[x] existing callers retain the current default;</li>
+<li>[x] a Session call can pass <code>retries=0</code> explicitly; and</li>
+<li>[x] the original exception remains reachable through <code>__cause__</code> for stable
+        Session failure classification.</li>
+<li>[x] Keep the incomplete Session out of <code>tensorcast.api.store</code> re-exports until
+      Phase 7 closes both transfer modes and the final public-surface gate.</li>
+</ul>
+<h3 id="unit-tests">Unit tests<a class="headerlink" href="#unit-tests" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestPublicContracts</code></li>
+<li>[x] validates frozen/forbid-extra models and the transfer discriminator;</li>
+<li>[x] rejects malformed keyspaces, lengths, capacities, and timeouts;</li>
+<li>[x] verifies result tuple types and nullable empty-transfer operation ID;</li>
+<li>[x] verifies public exception inheritance and failure schema; and</li>
+<li>[x] verifies caller inputs expose no artifact-id or protobuf field.</li>
+<li>[x] <code>TestGrpcMessageLimits</code></li>
+<li>[x] verifies defaults and environment overrides are normalized once;</li>
+<li>[x] mutates the environment after client construction and proves refresh
+        retains the original snapshot;</li>
+<li>[x] proves channel options and Session access observe identical values;</li>
+<li>[x] proves invalid environment values follow existing fallback behavior;
+        and</li>
+<li>[x] spies on region get/put wrappers and proves <code>retries=0</code> reaches
+        <code>_unary_call()</code> when requested while the old default remains unchanged.</li>
+</ul>
+<h3 id="validation-gate">Validation gate<a class="headerlink" href="#validation-gate" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"PublicContracts or GrpcMessageLimits"</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">  </span>tensorcast/daemon_ctl.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">  </span>tensorcast/api/store/__init__.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">  </span>tensorcast/daemon_ctl.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 1 exit criteria:</p>
+<ul>
+<li>all contract declarations and effective-limit tests pass in the leaf module;</li>
+<li>old <code>DaemonCtl</code> callers keep their previous retry default;</li>
+<li>no public signature contains a generated protobuf or daemon-private type.</li>
+</ul>
+<h2 id="phase-2-process-attach-registry-and-state-admission">Phase 2: Process Attach, Registry, And State Admission<a class="headerlink" href="#phase-2-process-attach-registry-and-state-admission" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>establish one process-scoped Session and one sticky failure domain;</li>
+<li>make lifecycle and admission behavior deterministic before adding memory and
+  transfer logic.</li>
+</ul>
+<h3 id="implementation-tasks_1">Implementation tasks<a class="headerlink" href="#implementation-tasks_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Implement <code>RegionBackedArtifactSession.attach()</code> with a private client
+      factory seam for unit tests.</li>
+<li>[x] Normalize options and canonicalize the daemon endpoint before registry
+      lookup.</li>
+<li>[x] Capture owner PID internally; never accept it from the caller.</li>
+<li>[x] Implement the process registry keyed by owner PID and canonical endpoint.</li>
+<li>[x] Use one ordinary mutex held across lookup, endpoint validation, basic
+      handshake, and final publication.</li>
+<li>[x] Enforce one daemon endpoint per process and compare normalized operational
+      fingerprints for repeated attach.</li>
+<li>[x] Make equal attach return the same attached Session; reject conflicting
+      options, a second endpoint, and reattach after terminal termination.</li>
+<li>[x] Perform the minimal attach handshake:</li>
+<li>[x] daemon response is reachable;</li>
+<li>[x] <code>startup_phase == READY</code>;</li>
+<li>[x] CPU shared memory is enabled;</li>
+<li>[x] configured endpoint and local-handle facts are node-local; and</li>
+<li>[x] required basic fields are present.</li>
+<li>[x] Map all pre-publication connection/readiness/capability failures to
+      <code>RegionSessionAttachError</code> with the original cause retained.</li>
+<li>[x] Implement independent <code>READY | FAILED</code> health and
+      <code>ATTACHED | TERMINATED</code> lifecycle state.</li>
+<li>[x] Implement the two-stage state gate:</li>
+<li>[x] take a strong-reference input snapshot;</li>
+<li>[x] check <code>FAILED</code> before <code>TERMINATED</code>;</li>
+<li>[x] validate outside the lock;</li>
+<li>[x] recheck before final RPC admission; and</li>
+<li>[x] recheck state before returning a local validation error.</li>
+<li>[x] Implement atomic first-failure retention and diagnostic in-flight count.</li>
+<li>[x] Implement empty-batch behavior with the preliminary state gate, no RPC,
+      no in-flight increment, empty tuples, zero timings, and
+      <code>operation_id=None</code> for empty transfer results.</li>
+<li>[x] Implement idempotent <code>terminate_process_session()</code> admission closure.</li>
+<li>[x] Do not call <code>release_daemon_client()</code> from termination.</li>
+<li>[x] Add a private unit-test fixture that isolates registry state without
+      creating a public reset API.</li>
+</ul>
+<h3 id="unit-tests_1">Unit tests<a class="headerlink" href="#unit-tests_1" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestAttachRegistry</code></li>
+<li>[x] same normalized options return one object;</li>
+<li>[x] different endpoint or operational fingerprint is rejected;</li>
+<li>[x] session name and region prefix are first-attach-wins diagnostics;</li>
+<li>[x] concurrent attach performs exactly one handshake/publication;</li>
+<li>[x] non-ready daemon and disabled CPU shared memory raise attach error;</li>
+<li>[x] attach error publishes no Session; and</li>
+<li>[x] registry lock is not acquired by data-plane method stubs.</li>
+<li>[x] <code>TestSessionState</code></li>
+<li>[x] failed state wins over terminated state and invalid input;</li>
+<li>[x] terminated state wins over invalid input on a healthy Session;</li>
+<li>[x] a concurrent failure between preliminary and final gates prevents RPC;</li>
+<li>[x] empty methods issue no RPC and return exact empty result schemas;</li>
+<li>[x] empty methods still raise for failed or terminated state;</li>
+<li>[x] termination is idempotent; and</li>
+<li>[x] termination never releases the shared daemon client.</li>
+</ul>
+<h3 id="validation-gate_1">Validation gate<a class="headerlink" href="#validation-gate_1" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"AttachRegistry or SessionState"</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span>tests/python/test_daemon_ctl_retry.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span>tests/python/api/test_startup_client_config.py
+</span><span id="__span-3-8"><a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-9"><a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-10"><a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-3-11"><a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-12"><a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-3-13"><a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 2 exit criteria:</p>
+<ul>
+<li>concurrent attach cannot create two Sessions;</li>
+<li>terminal state ordering and empty-call behavior are fully unit tested;</li>
+<li>no attach failure leaks a raw gRPC/protobuf exception through the public API.</li>
+</ul>
+<h2 id="phase-3-host-spans-region-allocation-and-pinned-ownership">Phase 3: Host Spans, Region Allocation, And Pinned Ownership<a class="headerlink" href="#phase-3-host-spans-region-allocation-and-pinned-ownership" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>make the process-local memory and region lifecycle correct before any
+  artifact RPC references those addresses.</li>
+</ul>
+<h3 id="implementation-tasks_2">Implementation tasks<a class="headerlink" href="#implementation-tasks_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Implement <code>HostMemorySpan.from_tensor()</code>:</li>
+<li>[x] require CPU-accessible, dense contiguous storage;</li>
+<li>[x] validate byte offset, byte length, bounds, and overflow;</li>
+<li>[x] resolve address and length once per call snapshot; and</li>
+<li>[x] strongly retain the tensor/storage owner.</li>
+<li>[x] Implement <code>HostMemorySpan.from_address()</code> with mandatory explicit owner,
+      positive address/length checks, and overflow validation.</li>
+<li>[x] Enforce <code>artifact.byte_length == span.byte_length</code> when constructing or
+      validating <code>RegionArtifactTransfer</code>.</li>
+<li>[x] Implement a private per-allocation region record containing handle,
+      attachment, FD/mmap roots, tensor root, address interval, capacity,
+      lifecycle, and optional slot geometry.</li>
+<li>[x] Implement daemon-managed, non-expiring <code>HOST_SHARED/ALLOCATOR</code> region
+      creation for <code>allocate_host_tensor()</code>.</li>
+<li>[x] Attach the local FD, mmap the complete region, and construct a dense
+      contiguous CPU <code>torch.Tensor</code> with the requested shape and dtype.</li>
+<li>[x] Validate non-negative shape dimensions, supported element size,
+      multiplication overflow, non-zero allocation size, and CPU-only device
+      semantics.</li>
+<li>[x] Retain every allocation; never overwrite the previous allocation record.</li>
+<li>[x] Implement interval-based address containment with exactly-one-record
+      resolution and cross-region rejection.</li>
+<li>[x] Implement region lifecycle transitions:</li>
+<li>[x] <code>Building -&gt; RolledBack</code> only when no view escaped, no data RPC used the
+        region, and cleanup is exact;</li>
+<li>[x] <code>Building -&gt; ProcessPinned</code> when a tensor or scratch arena becomes
+        usable; and</li>
+<li>[x] no SDK-driven reclamation after <code>ProcessPinned</code>.</li>
+<li>[x] On exact <code>Building</code> rollback, close local resources and invoke release and
+      unregister exactly once.</li>
+<li>[x] On ambiguous setup failure, latch Session failure and retain every
+      possibly live daemon/local resource.</li>
+<li>[x] Ensure Session failure and termination retain all mappings and tensor
+      roots until process teardown.</li>
+</ul>
+<h3 id="unit-tests_2">Unit tests<a class="headerlink" href="#unit-tests_2" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestHostMemorySpan</code></li>
+<li>[x] tensor view address/offset/length is correct;</li>
+<li>[x] non-contiguous, non-CPU, zero, negative, out-of-bounds, and overflowing
+        spans are rejected;</li>
+<li>[x] explicit owner is mandatory for raw address spans;</li>
+<li>[x] caller sequence mutation does not change the captured span facts; and</li>
+<li>[x] weak-reference tests prove tensor and explicit owner retention through
+        return or raise.</li>
+<li>[x] <code>TestRegionAllocation</code></li>
+<li>[x] fake host-shared registration plus a temporary memfd produces a dense,
+        page-aligned CPU tensor with stable address and exact size;</li>
+<li>[x] two or more allocations remain live and independently resolvable;</li>
+<li>[x] ranges crossing region boundaries or matching no region fail locally;</li>
+<li>[x] exact unexposed rollback releases/unregisters once;</li>
+<li>[x] ambiguous registration/FD/mmap outcomes latch and do not clean up;</li>
+<li>[x] returned allocation, failure, and termination never release a
+        process-pinned region; and</li>
+<li>[x] endpoint/local-handle reachability checks allocate no probe region.</li>
+</ul>
+<h3 id="validation-gate_2">Validation gate<a class="headerlink" href="#validation-gate_2" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"HostMemorySpan or RegionAllocation"</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">  </span>tests/python/test_store_region_registration.py
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 3 exit criteria:</p>
+<ul>
+<li>allocator tensors are real mapped CPU tensors, not copies;</li>
+<li>multiple region mappings remain strongly rooted and address-resolvable;</li>
+<li>no process-pinned cleanup RPC is reachable from failure or termination.</li>
+</ul>
+<h2 id="phase-4-artifact-lowering-layouts-wire-budget-and-outcomes">Phase 4: Artifact Lowering, Layouts, Wire Budget, And Outcomes<a class="headerlink" href="#phase-4-artifact-lowering-layouts-wire-budget-and-outcomes" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>centralize all generated-protobuf construction and response interpretation;</li>
+<li>prove pure compilation rules before executing transfers.</li>
+</ul>
+<h3 id="implementation-tasks_3">Implementation tasks<a class="headerlink" href="#implementation-tasks_3" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Derive canonical artifact IDs exclusively with
+      <code>build_byte_artifact_cgid()</code> from each <code>ByteArtifactSpec</code> keyspace and
+      engine key.</li>
+<li>[x] Reuse canonical byte-artifact selection helpers; do not maintain an
+      identity or selection cache.</li>
+<li>[x] Reject duplicate derived artifact IDs in one batch before RPC admission.</li>
+<li>[x] Build put invariants with layout ID, byte length, and
+      <code>LAYOUT_AND_SIZE_ONLY</code> verification; do not hash caller bytes.</li>
+<li>[x] Implement scratch layout compilation with one storage and packed offsets.</li>
+<li>[x] Implement allocator layout compilation:</li>
+<li>[x] resolve every span to exactly one allocation record;</li>
+<li>[x] preserve caller order;</li>
+<li>[x] deduplicate regions in first-appearance order;</li>
+<li>[x] assign request-local storage IDs;</li>
+<li>[x] compute checked logical storage bases and offsets; and</li>
+<li>[x] emit one storage entry per touched region.</li>
+<li>[x] Implement per-region candidate geometry validation.</li>
+<li>[x] Commit unseen geometry atomically and all-or-nothing only during final
+      admission after all local and wire-budget validation passes.</li>
+<li>[x] Establish lock order: Session state before geometry; hold neither across
+      RPC.</li>
+<li>[x] Implement non-zero monotonic RPC generation and derive slot index from
+      region-local offset and frozen slot size.</li>
+<li>[x] Attach one request generation to all direct offsets and validate exact
+      echoed slot tokens.</li>
+<li>[x] Build completed request protobufs before applying <code>ByteSize()</code>.</li>
+<li>[x] Estimate ordinary response size from artifact IDs, statuses, direct slot
+      tokens, protobuf overhead, and fixed headroom.</li>
+<li>[x] Reject oversized transfer batches before final admission.</li>
+<li>[x] Partition exists input into maximal contiguous sub-batches that fit both
+      client send and receive limits.</li>
+<li>[x] Give every exists partition one SDK correlation/operation ID; retries of
+      that partition reuse it, while the next partition gets another ID.</li>
+<li>[x] Implement artifact-based outcome correlation and restore caller order.</li>
+<li>[x] Allow only operation-specific <code>OK</code> and <code>MISS</code> statuses from design
+      <code>0122</code>; reject missing, duplicate, unknown, or malformed outcomes.</li>
+<li>[x] Map <code>REGION_LOST</code> only from structured machine-readable region evidence;
+      never parse free-form error text.</li>
+</ul>
+<h3 id="unit-tests_3">Unit tests<a class="headerlink" href="#unit-tests_3" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestArtifactLowering</code></li>
+<li>[x] same keyspace/engine key produces the canonical existing byte-artifact
+        identity;</li>
+<li>[x] multiple keyspaces coexist in one batch;</li>
+<li>[x] duplicates are rejected;</li>
+<li>[x] put invariant is layout-and-size-only; and</li>
+<li>[x] no public result exposes artifact IDs or selections.</li>
+<li>[x] <code>TestWireBudget</code></li>
+<li>[x] uses the exact <code>DaemonCtl</code> limit snapshot;</li>
+<li>[x] measures completed request protobufs;</li>
+<li>[x] rejects get/put before RPC when either direction exceeds its limit;</li>
+<li>[x] partitions exists at exact boundary conditions and preserves order;</li>
+<li>[x] uses one operation ID per partition and reuses it for retries; and</li>
+<li>[x] reports total exists RPC elapsed time across partitions and attempts.</li>
+<li>[x] <code>TestOutcomeValidation</code></li>
+<li>[x] accepts operation-specific OK/MISS combinations;</li>
+<li>[x] rejects missing, duplicate, unknown, reordered-with-bad-correlation,
+        and non-allowlisted outcomes;</li>
+<li>[x] validates echoed direct slot tokens;</li>
+<li>[x] maps generic <code>FAILED_PRECONDITION</code> to <code>DAEMON_STATUS</code>;</li>
+<li>[x] maps only typed region evidence to <code>REGION_LOST</code>; and</li>
+<li>[x] proves error-message text does not affect classification.</li>
+<li>[x] Geometry tests</li>
+<li>[x] compatible first use freezes one slot size;</li>
+<li>[x] locally invalid or wire-oversized input freezes nothing;</li>
+<li>[x] a multi-region install is all-or-nothing; and</li>
+<li>[x] concurrent conflicting first use admits at most one geometry and sends
+        no RPC for the loser.</li>
+</ul>
+<h3 id="validation-gate_3">Validation gate<a class="headerlink" href="#validation-gate_3" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"ArtifactLowering or WireBudget or OutcomeValidation or geometry"</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">  </span>tests/python/test_byte_artifact_identity.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span>tests/python/api/test_materialization_token_guards.py
+</span><span id="__span-5-8"><a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-9"><a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-10"><a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-5-11"><a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-12"><a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-5-13"><a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 4 exit criteria:</p>
+<ul>
+<li>pure lowering produces valid scratch and multi-region direct requests;</li>
+<li>an invalid request cannot mutate frozen geometry or issue an RPC;</li>
+<li>all outcome and failure-code decisions are deterministic and message-text
+  independent.</li>
+</ul>
+<h2 id="phase-5-scratch-transfer-mode">Phase 5: Scratch Transfer Mode<a class="headerlink" href="#phase-5-scratch-transfer-mode" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>complete the staged compatibility path using ordinary caller host memory;</li>
+<li>isolate late writes from caller targets after a fatal get.</li>
+</ul>
+<h3 id="implementation-tasks_4">Implementation tasks<a class="headerlink" href="#implementation-tasks_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Lazily create one fixed-capacity daemon-managed <code>HOST_SHARED/SCRATCH</code>
+      region for get and one for put.</li>
+<li>[x] Move each arena to <code>ProcessPinned</code> before its first admitted transfer.</li>
+<li>[x] Retain both mappings until process teardown; never resize, replace,
+      expire, release, or unregister them after pinning.</li>
+<li>[x] Use independent get and put locks so one get and one put may run
+      concurrently while same-direction calls serialize.</li>
+<li>[x] Implement scratch put:</li>
+<li>[x] validate and snapshot all source spans;</li>
+<li>[x] reject total packed bytes above capacity;</li>
+<li>[x] pack in caller order;</li>
+<li>[x] issue one region-backed put with <code>retries=0</code>; and</li>
+<li>[x] validate all outcomes before returning the success mask.</li>
+<li>[x] Implement scratch get:</li>
+<li>[x] build packed target offsets;</li>
+<li>[x] issue one region-backed get with <code>retries=0</code>;</li>
+<li>[x] validate the complete response before copying;</li>
+<li>[x] copy only successful items to caller spans; and</li>
+<li>[x] leave every false target unconsumable and unchanged where practical.</li>
+<li>[x] On fatal scratch get, copy no scratch bytes to caller targets and never
+      reuse the failed arena.</li>
+<li>[x] Record pack, copy, RPC, bytes, and direction metrics without artifact IDs
+      as unbounded labels.</li>
+</ul>
+<h3 id="unit-tests_4">Unit tests<a class="headerlink" href="#unit-tests_4" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestScratchTransfer</code></li>
+<li>[x] regions are lazy, direction-specific, fixed-capacity, and created once;</li>
+<li>[x] put packs exact bytes and preserves caller order;</li>
+<li>[x] get copies only OK items after whole-response validation;</li>
+<li>[x] MISS/False target is not consumed;</li>
+<li>[x] malformed/fatal get copies no target bytes and latches Session;</li>
+<li>[x] overflow rejects before arena mutation and RPC;</li>
+<li>[x] get/get and put/put serialize, while get/put can overlap;</li>
+<li>[x] get and put each call the raw RPC with <code>retries=0</code>;</li>
+<li>[x] empty calls allocate no arena; and</li>
+<li>[x] termination/failure sends no arena cleanup RPC.</li>
+</ul>
+<h3 id="validation-gate_4">Validation gate<a class="headerlink" href="#validation-gate_4" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"ScratchTransfer"</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span>tests/python/test_store_region_registration.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">  </span>tests/python/test_daemon_ctl_retry.py
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 5 exit criteria:</p>
+<ul>
+<li>scratch mode can complete mixed-hit batches without exposing scratch storage;</li>
+<li>no failed scratch get can publish partially validated bytes to caller targets;</li>
+<li>same-direction arena reuse is race-free.</li>
+</ul>
+<h2 id="phase-6-allocator-backed-direct-transfer-mode">Phase 6: Allocator-Backed Direct Transfer Mode<a class="headerlink" href="#phase-6-allocator-backed-direct-transfer-mode" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>complete caller-side zero-copy transfer for Session-allocated host memory;</li>
+<li>support asymmetric or otherwise independently allocated regions in one batch.</li>
+</ul>
+<h3 id="implementation-tasks_5">Implementation tasks<a class="headerlink" href="#implementation-tasks_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Accept direct spans only when wholly contained in allocations owned by the
+      same Session.</li>
+<li>[x] Compile every direct batch into one multi-storage request, regardless of
+      how many owned regions it touches.</li>
+<li>[x] Submit caller-region addresses directly; do not allocate or copy through
+      a Session scratch arena.</li>
+<li>[x] Keep all referenced spans, tensor roots, mmap roots, and explicit owners
+      alive until return or raise.</li>
+<li>[x] Enforce pairwise non-overlap within one batch.</li>
+<li>[x] Preserve caller-owned cross-call exclusivity without adding an in-flight
+      interval allocator to the SDK.</li>
+<li>[x] Use no client deadline when <code>transfer_timeout_s=None</code>.</li>
+<li>[x] Issue direct get and put with exactly one SDK attempt (<code>retries=0</code>).</li>
+<li>[x] Return one transfer operation ID for the one direct RPC.</li>
+<li>[x] Treat only <code>True</code> direct-get targets as consumable; after fatal direct get,
+      mark every submitted target untrusted through the raised Session error.</li>
+<li>[x] Allow concurrent direct get/put calls without a global data-plane lock;
+      retain only short state, region, geometry, and generation locks.</li>
+<li>[x] After successful put returns, release the source borrow and ensure later
+      caller mutation cannot change the stored artifact.</li>
+<li>[x] Never call explicit stable-backing activation; rely on daemon layout
+      validation and the frozen region geometry.</li>
+</ul>
+<h3 id="unit-tests_5">Unit tests<a class="headerlink" href="#unit-tests_5" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestAllocatorDirectTransfer</code></li>
+<li>[x] one-region get/put compiles exact offsets with no scratch allocation;</li>
+<li>[x] two-region and three-region batches emit one storage entry per region
+        and one RPC total;</li>
+<li>[x] first-appearance storage ordering and logical bases are deterministic;</li>
+<li>[x] a batch can mix keyspaces while preserving input-order results;</li>
+<li>[x] foreign, crossing, overlapping, and out-of-range spans fail before RPC;</li>
+<li>[x] <code>transfer_timeout_s=None</code> is passed as no deadline;</li>
+<li>[x] configured finite timeout is passed through but retry remains zero;</li>
+<li>[x] get and put never call scratch-copy helpers;</li>
+<li>[x] success/MISS consumption rules match the public contract; and</li>
+<li>[x] failure and termination never release allocator mappings.</li>
+<li>[x] <code>TestConcurrentAdmission</code></li>
+<li>[x] direct get and put may overlap in time;</li>
+<li>[x] generation values remain unique and non-zero under concurrency;</li>
+<li>[x] Session/geometry locks are released before blocking RPC;</li>
+<li>[x] a failure latched by one call prevents later admission;</li>
+<li>[x] an already completed concurrent success is discarded if health failed
+        before exposure; and</li>
+<li>[x] counter wrap fails closed.</li>
+</ul>
+<h3 id="validation-gate_5">Validation gate<a class="headerlink" href="#validation-gate_5" title="Permanent link">&para;</a></h3>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-3"><a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-4"><a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"AllocatorDirectTransfer or ConcurrentAdmission"</span>
+</span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-7"><a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">  </span>-k<span class="w"> </span><span class="s2">"geometry or OutcomeValidation"</span>
+</span><span id="__span-7-8"><a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-9"><a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-10"><a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-7-11"><a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-12"><a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-7-13"><a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>Phase 6 exit criteria:</p>
+<ul>
+<li>allocator mode is caller-side zero-copy and supports multiple live regions;</li>
+<li>direct region RPCs have no SDK retry path;</li>
+<li>concurrency never holds a Session/geometry/registry lock across blocking RPC.</li>
+</ul>
+<h2 id="phase-7-failure-hardening-daemon-acceptance-and-documentation-closure">Phase 7: Failure Hardening, Daemon Acceptance, And Documentation Closure<a class="headerlink" href="#phase-7-failure-hardening-daemon-acceptance-and-documentation-closure" title="Permanent link">&para;</a></h2>
+<p>Purpose:</p>
+<ul>
+<li>prove the complete public contract against fault injection and a real prebuilt
+  daemon;</li>
+<li>close public exports, docs, and compatibility validation.</li>
+</ul>
+<h3 id="implementation-tasks_6">Implementation tasks<a class="headerlink" href="#implementation-tasks_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Complete stable first-failure classification:</li>
+<li>[x] transport/deadline/cancellation/availability -&gt; <code>TRANSPORT</code>;</li>
+<li>[x] non-allowlisted/unknown item status -&gt; <code>DAEMON_STATUS</code>;</li>
+<li>[x] ambiguous region setup -&gt; <code>REGION_SETUP</code>;</li>
+<li>[x] typed already-pinned region loss -&gt; <code>REGION_LOST</code>;</li>
+<li>[x] malformed response/token mismatch -&gt; <code>MALFORMED_RESPONSE</code>; and</li>
+<li>[x] otherwise unexpected admitted SDK failure -&gt; <code>INTERNAL</code>.</li>
+<li>[x] Atomically retain only the first failure with UTC timestamp, operation
+      kind, and failing operation ID.</li>
+<li>[x] Ensure later allocation, exists, get, and put calls raise that same
+      failure without issuing RPC.</li>
+<li>[x] For partitioned exists, stop before the next partition after failure or
+      termination and expose no partial masks.</li>
+<li>[x] Ensure first fatal logging contains traceback once and derivative logs are
+      rate-limited.</li>
+<li>[x] Finish termination behavior:</li>
+<li>[x] close new admission;</li>
+<li>[x] retain control resources until admitted work exits;</li>
+<li>[x] stop only Session-owned helper resources;</li>
+<li>[x] do not close/release the process-shared <code>DaemonCtl</code>; and</li>
+<li>[x] never unmap or release process-pinned regions.</li>
+<li>[x] Add generic observability required by <code>0122</code> without high-cardinality
+      metric labels.</li>
+<li>[x] Add end-to-end Python tests that launch the supplied prebuilt daemon using
+      <code>tests/python/utils/daemon.py</code>.</li>
+<li>[x] Update <code>tensorcast/api/store/README.md</code> with scratch and allocator
+      examples and explicit ownership/failure warnings.</li>
+<li>[x] Finalize <code>tensorcast.api.store</code> exports and update API documentation.</li>
+<li>[x] Synchronize design <code>0122</code> if implementation closes any naming-only gap;
+      do not change its accepted ownership or failure semantics silently.</li>
+</ul>
+<h3 id="unit-tests_6">Unit tests<a class="headerlink" href="#unit-tests_6" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] <code>TestFailureContract</code></li>
+<li>[x] each stable failure-code mapping is covered;</li>
+<li>[x] simultaneous fatal calls retain exactly one first failure;</li>
+<li>[x] every later method raises the same retained failure object/data;</li>
+<li>[x] no RPC occurs after the latch;</li>
+<li>[x] a fatal exists partition records that partition's operation ID;</li>
+<li>[x] generic status text cannot manufacture <code>REGION_LOST</code>; and</li>
+<li>[x] successful concurrent results are suppressed after a latch.</li>
+<li>[x] <code>TestTerminationContract</code></li>
+<li>[x] healthy and failed termination are idempotent;</li>
+<li>[x] failed error continues to win after termination;</li>
+<li>[x] admitted synchronous work may reach its terminal path;</li>
+<li>[x] new work and new exists partitions are rejected;</li>
+<li>[x] helper cleanup is deferred until in-flight reaches zero; and</li>
+<li>[x] no daemon client, FD attachment, region, mmap, or tensor root is
+        released by termination.</li>
+<li>[x] Public documentation examples execute as unit tests or doctest-equivalent
+      snippets with a fake client.</li>
+</ul>
+<h3 id="prebuilt-daemon-acceptance-tests">Prebuilt-daemon acceptance tests<a class="headerlink" href="#prebuilt-daemon-acceptance-tests" title="Permanent link">&para;</a></h3>
+<ul>
+<li>[x] Scratch put -&gt; exists -&gt; get round trip with multiple artifacts.</li>
+<li>[x] Scratch partial-hit get copies only successful targets.</li>
+<li>[x] Allocator tensor put -&gt; exists -&gt; direct get round trip.</li>
+<li>[x] One allocator RPC spans at least two independent host-shared regions.</li>
+<li>[x] Direct put return is quiescent enough that mutating/reusing the caller
+      source afterward does not change later retrieved bytes.</li>
+<li>[x] Daemon rejection causes sticky Session failure and later SDK calls issue
+      no RPC.</li>
+<li>[x] Session termination sends no region release/unregister request.</li>
+<li>[x] A subprocess owner exit allows the daemon's existing PID cleanup path to
+      reclaim process-pinned regions.</li>
+</ul>
+<h3 id="validation-gate_6">Validation gate<a class="headerlink" href="#validation-gate_6" title="Permanent link">&para;</a></h3>
+<p>The Python lane uses the environment-prefix form documented by the TensorCast
+testing guide. If the daemon is not at the default Bazel output path, set
+<code>TENSORCAST_DAEMON_BIN</code> to its absolute executable path.</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-8-1"><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-8-2"><a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-3"><a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span><span id="__span-8-4"><a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-5"><a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="w">  </span>tests/python/api/test_public_surface.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-6"><a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="w">  </span>tests/python/test_daemon_ctl_retry.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-7"><a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="w">  </span>tests/python/test_store_region_registration.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-8"><a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w">  </span>tests/python/test_byte_artifact_identity.py
+</span><span id="__span-8-9"><a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-10"><a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w">  </span><span class="nv">TENSORCAST_DAEMON_BIN</span><span class="o">=</span>/absolute/path/to/tensorcast_daemon<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-11"><a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w">  </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>tests/python/test_region_backed_artifact_session_e2e.py
+</span><span id="__span-8-12"><a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-13"><a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="w">  </span>tensorcast/daemon_ctl.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-14"><a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-15"><a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="w">  </span>tensorcast/api/store/__init__.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-16"><a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-17"><a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="w">  </span>tests/python/test_region_backed_artifact_session_e2e.py
+</span><span id="__span-8-18"><a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a>uv<span class="w"> </span>run<span class="w"> </span>ruff<span class="w"> </span>format<span class="w"> </span>--check<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-19"><a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a><span class="w">  </span>tensorcast/daemon_ctl.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-20"><a id="__codelineno-8-20" name="__codelineno-8-20" href="#__codelineno-8-20"></a><span class="w">  </span>tensorcast/api/store/region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-21"><a id="__codelineno-8-21" name="__codelineno-8-21" href="#__codelineno-8-21"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-8-22"><a id="__codelineno-8-22" name="__codelineno-8-22" href="#__codelineno-8-22"></a><span class="w">  </span>tests/python/test_region_backed_artifact_session_e2e.py
+</span></code></pre></div>
+<p>The existing daemon contract lane is validation of the supplied binary/source
+contract, not a request to change or build daemon code for <code>0122</code>:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-9-1"><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>bazel<span class="w"> </span><span class="nb">test</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-2"><a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>//daemon:grpc_service_impl_batch_runtime_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-3"><a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>//daemon:byte_artifact_region_layout_host_shared_test<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-4"><a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">  </span>--test_env<span class="o">=</span><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-9-5"><a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">  </span>--test_output<span class="o">=</span>errors
+</span></code></pre></div>
+<p>Phase 7 exit criteria:</p>
+<ul>
+<li>all focused and cumulative Python tests pass in fake CUDA mode;</li>
+<li>both transfer modes pass against the prebuilt daemon;</li>
+<li>existing daemon host-shared/batch contract tests remain green;</li>
+<li>public docs require no raw protobuf, daemon-control, or region-handle use.</li>
+</ul>
+<h1 id="test-plan-summary">Test Plan Summary<a class="headerlink" href="#test-plan-summary" title="Permanent link">&para;</a></h1>
+<h2 id="fast-unit-lane">Fast unit lane<a class="headerlink" href="#fast-unit-lane" title="Permanent link">&para;</a></h2>
+<p>Run after every SDK change:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-10-1"><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-10-2"><a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-10-3"><a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span>tests/python/api/test_region_backed_artifact_session.py
+</span></code></pre></div>
+<p>This lane must use fake clients and temporary local memory only. It must not
+look for or launch <code>tensorcast_daemon</code>.</p>
+<h2 id="sdk-regression-lane">SDK regression lane<a class="headerlink" href="#sdk-regression-lane" title="Permanent link">&para;</a></h2>
+<p>Run before each phase closes:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-11-1"><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-11-2"><a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-3"><a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="w">  </span>tests/python/api/test_public_surface.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-4"><a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a><span class="w">  </span>tests/python/test_daemon_ctl_retry.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-5"><a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">  </span>tests/python/test_store_region_registration.py<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-11-6"><a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">  </span>tests/python/test_byte_artifact_identity.py
+</span></code></pre></div>
+<h2 id="prebuilt-daemon-lane">Prebuilt-daemon lane<a class="headerlink" href="#prebuilt-daemon-lane" title="Permanent link">&para;</a></h2>
+<p>Run at Phase 7 and before merge:</p>
+<div class="language-bash highlight"><pre><span></span><code><span id="__span-12-1"><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="nb">source</span><span class="w"> </span>.venv/bin/activate
+</span><span id="__span-12-2"><a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="nv">TENSORCAST_CUDA_BACKEND</span><span class="o">=</span>fake<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-12-3"><a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">  </span><span class="nv">TENSORCAST_DAEMON_BIN</span><span class="o">=</span>/absolute/path/to/tensorcast_daemon<span class="w"> </span><span class="se">\</span>
+</span><span id="__span-12-4"><a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">  </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>tests/python/test_region_backed_artifact_session_e2e.py
+</span></code></pre></div>
+<p>No <code>setup.py build_ext</code>, <code>bazel build</code>, proto generation, or C++ source change
+is part of this plan. The optional Bazel test invocation above is a compatibility
+gate when the prepared build environment is available.</p>
+<h1 id="rollout-and-backout">Rollout And Backout<a class="headerlink" href="#rollout-and-backout" title="Permanent link">&para;</a></h1>
+<h2 id="rollout">Rollout<a class="headerlink" href="#rollout" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[ ] Land phases in execution order or keep later phases hidden until all prior
+      gates are green.</li>
+<li>[x] Keep the new Session opt-in; do not alter ordinary <code>Artifact</code> or <code>Store</code>
+      behavior.</li>
+<li>[x] Preserve old <code>DaemonCtl</code> retry defaults and make zero retry explicit only
+      for the new direct/scratch region transfer path.</li>
+<li>[x] Publish public docs only when both scratch and allocator prebuilt-daemon
+      tests pass.</li>
+<li>[ ] Integrations should first enable scratch mode, then allocator mode, while
+      retaining their own policy for converting sticky L3 failure into local
+      fallback.</li>
+</ul>
+<h2 id="backout">Backout<a class="headerlink" href="#backout" title="Permanent link">&para;</a></h2>
+<ul>
+<li>[ ] Remove the public exports and Session module without changing existing
+      Store APIs.</li>
+<li>[ ] Revert the private effective-limit accessor while preserving existing
+      environment parsing if Session code is backed out.</li>
+<li>[ ] Preserve backwards-compatible retry defaults in every partial rollback.</li>
+<li>[ ] Never back out by making a process-pinned region releasable on RPC failure
+      or Session termination.</li>
+<li>[ ] Do not add a framework-specific raw protobuf path as a temporary fallback.</li>
+</ul>
+<h1 id="risks-and-tracking">Risks And Tracking<a class="headerlink" href="#risks-and-tracking" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Risk: a Session data-path call accidentally inherits the existing region
+      RPC retry default.</li>
+<li>mitigation: spy-based tests assert the exact <code>retries=0</code> value for scratch
+    and direct get/put.</li>
+<li>[x] Risk: unit-test cleanup masks illegal production region cleanup.</li>
+<li>mitigation: fake registry reset is test-only; process-pinned lifecycle tests
+    assert no release/unregister call, and real reclamation uses a subprocess
+    owner exit.</li>
+<li>[x] Risk: Python owner objects are collected while an RPC still uses an
+      address.</li>
+<li>mitigation: immutable call snapshots and strong-reference/weak-reference
+    tests cover every owner path.</li>
+<li>[x] Risk: multi-region offset arithmetic aliases two storages or overflows.</li>
+<li>mitigation: checked arithmetic, deterministic first-appearance ordering,
+    and two/three-region layout tests.</li>
+<li>[x] Risk: an invalid first batch poisons region slot geometry.</li>
+<li>mitigation: all-or-nothing commit after validation with concurrent
+    conflicting-first-use tests.</li>
+<li>[x] Risk: response size exceeds the client receive limit despite conservative
+      ordinary-outcome estimation.</li>
+<li>mitigation: keep fixed headroom; classify exceptional transport overflow as
+    fatal; require compatible daemon/client limits operationally.</li>
+<li>[x] Risk: direct no-deadline RPC hangs a test or shutdown path.</li>
+<li>mitigation: unit tests use bounded fakes; end-to-end tests use an outer
+    subprocess/test timeout without changing the Session's no-deadline contract.</li>
+<li>[x] Risk: sticky failure hides an artifact-scoped daemon rejection.</li>
+<li>mitigation: retain the intentionally small success allowlist and test every
+    non-allowlisted status as Session-fatal.</li>
+<li>[x] Risk: fake CUDA proves CPU/shared-memory correctness but not accelerator
+      host registration behavior.</li>
+<li>mitigation: accelerator registration remains explicitly caller-owned and
+    outside <code>0122</code> acceptance.</li>
+</ul>
+<h1 id="owner-checklist">Owner Checklist<a class="headerlink" href="#owner-checklist" title="Permanent link">&para;</a></h1>
+<ul>
+<li>[x] Public caller supplies only keyspace, engine key, byte length, and owned
+      host spans.</li>
+<li>[x] Public types expose no canonical artifact ID, protobuf, daemon client,
+      region handle, layout enum, storage ID, or slot token.</li>
+<li>[x] One process has one attached endpoint and one sticky Session failure
+      domain.</li>
+<li>[x] Attach is serialized with one ordinary registry mutex.</li>
+<li>[x] Effective client send/receive limits are one immutable per-client
+      snapshot reused by channel refresh and Session sizing.</li>
+<li>[x] Scratch and direct get/put use zero SDK retries.</li>
+<li>[x] Exists partitions transparently, uses one operation ID per partition, and
+      exposes one ordered all-or-error result.</li>
+<li>[x] Multiple allocator regions coexist and one direct RPC can reference all
+      of them.</li>
+<li>[x] Caller memory is strongly retained for every synchronous borrow.</li>
+<li>[x] Only successful get targets are consumable.</li>
+<li>[x] Fatal RPC, malformed response, and typed region loss latch one stable first
+      failure and admit no later RPC.</li>
+<li>[x] Empty calls check Session state but issue no RPC.</li>
+<li>[x] Geometry commits only after complete local and wire-budget validation.</li>
+<li>[x] Failure and termination never release process-pinned regions or close the
+      process-shared daemon client.</li>
+<li>[x] Unit, SDK regression, prebuilt-daemon, daemon-contract, and Ruff gates are
+      green.</li>
+<li>[x] Design, implementation, tests, and public SDK documentation describe the
+      same contract.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
