@@ -89,14 +89,68 @@ tools/release.sh publish-test
 Verify in a clean venv:
 
 ```bash
-python -m venv /tmp/tc && source /tmp/tc/bin/activate
-pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
-pip install --index-url https://test.pypi.org/simple/ \
-            --extra-index-url https://pypi.org/simple/ \
-            tensorcast==0.1.1
-python -c "import tensorcast; print(tensorcast.__version__)"
-tensorcast-cli daemon start --help
+release_version="$(tr -d '[:space:]' < version.txt)"
+test_venv="$(mktemp -d)/venv"
+uv venv --python 3.10 "${test_venv}"
+
+# Resolve the TestPyPI wheel for this release, Python ABI, and architecture.
+# Install that exact artifact directly so TestPyPI packages cannot participate
+# in dependency resolution; all dependencies come from production PyPI.
+testpypi_metadata="${test_venv}/testpypi-release.json"
+for attempt in 1 2 3 4 5; do
+  if curl -fsSL \
+    "https://test.pypi.org/pypi/tensorcast/${release_version}/json" \
+    -o "${testpypi_metadata}"; then
+    break
+  fi
+  if [[ "${attempt}" == 5 ]]; then
+    echo "error: failed to download TestPyPI release metadata" >&2
+    exit 1
+  fi
+done
+
+testpypi_wheel_url="$(
+  TENSORCAST_METADATA="${testpypi_metadata}" \
+    "${test_venv}/bin/python" - <<'PY'
+import json
+import os
+import platform
+import sys
+
+with open(os.environ["TENSORCAST_METADATA"], encoding="utf-8") as file:
+    metadata = json.load(file)
+
+python_tag = f"cp{sys.version_info.major}{sys.version_info.minor}"
+architecture = platform.machine()
+candidates = [
+    file
+    for file in metadata["urls"]
+    if file["packagetype"] == "bdist_wheel"
+    and f"-{python_tag}-{python_tag}-" in file["filename"]
+    and file["filename"].endswith(f"{architecture}.whl")
+]
+if len(candidates) != 1:
+    available = ", ".join(file["filename"] for file in metadata["urls"])
+    raise SystemExit(
+        f"expected one {python_tag}/{architecture} wheel, found {len(candidates)}; "
+        f"available files: {available or 'none'}"
+    )
+
+print(candidates[0]["url"])
+PY
+)"
+
+uv pip install \
+  --no-config \
+  --python "${test_venv}/bin/python" \
+  --default-index https://pypi.org/simple \
+  "tensorcast @ ${testpypi_wheel_url}"
+"${test_venv}/bin/python" -c \
+  "import tensorcast; print(tensorcast.__version__)"
+"${test_venv}/bin/tensorcast-cli" daemon start --help
 ```
+
+Do not configure TestPyPI as an install index for this check. TestPyPI does not mirror production dependencies and may contain unrelated test releases with the same package names. Resolving the uploaded TensorCast wheel URL first keeps dependency resolution on production PyPI while still testing the exact artifact uploaded to TestPyPI.
 
 If anything fails, fix and bump to `0.1.1.post1` — TestPyPI rejects re-uploading
 the same version.
