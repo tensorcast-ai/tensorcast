@@ -1,0 +1,3320 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0108-tensor-aware-materialization-strategy-plane/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Tensor-Aware Materialization Strategy Plane - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Tensor-Aware Materialization Strategy Plane
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#follow-on-execution-contract-below-the-strategy-plane" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Follow-on Execution Contract Below the Strategy Plane
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Introduce a tensor-aware materialization strategy plane as one layer inside a
+long-term, selection-first materialization architecture.</p>
+<p>The final model is:</p>
+<ul>
+<li><code>ArtifactSelection</code> remains the only public selection contract.</li>
+<li><code>tensor_dict</code>, <code>materialize_view</code>, <code>bind_into</code>, and
+  <code>MaterializeIntoMappedTarget</code> keep the same public API shapes.</li>
+<li>semantic truth remains separate from execution strategy:</li>
+<li>resolved selection and view identity,</li>
+<li>resolved representation-transform contract,</li>
+<li>target layout and verification or publication requirements.</li>
+<li>source acquisition remains separate from execution strategy:</li>
+<li>existing replica or local alias,</li>
+<li>P2P transport,</li>
+<li>disk or local file source.</li>
+<li>execution environment facts remain separate from both semantic truth and
+  retrieval policy:</li>
+<li>collective group or topology context,</li>
+<li>source locality and source-sharing domain,</li>
+<li>planner cache and budget-relevant capabilities.</li>
+<li><code>MaterializationFacade</code> becomes the lowering boundary from resolved semantic
+  truth plus acquired source capabilities into executor strategy for ordinary
+  replica loads, target-backed materialization, and mapped-target flows.</li>
+<li>common runtime lowers into one shared <code>ExecutionStrategyPlan</code> before executor
+  choice.</li>
+<li>strategy first allocates typed work into explicit lanes, then lowers those
+  lanes into executor-private planning artifacts.</li>
+<li>one request may use mixed execution:</li>
+<li>collective-admitted typed ops,</li>
+<li>local typed ops,</li>
+<li>deferred typed ops that keep typed identity while falling through to a
+    later backend-specific lowering,</li>
+<li>residual generic byte-range fallback ops.</li>
+<li><code>ByteRangeMap</code> remains the canonical fallback IR and residual explainability
+  surface, but no longer acts as the mandatory primary IR for all retrievals.</li>
+<li>executor-private planning artifacts do not become SDK, proto, or generic
+  <code>MaterializeHints</code> contract.</li>
+<li>source-bound mapped and binding requests must also consume the same shared
+  strategy abstraction:</li>
+<li>explicit lane allocation is required before execution begins,</li>
+<li>runtime must execute the chosen plan exactly,</li>
+<li>and implicit widening to a slower generic path is forbidden.</li>
+</ul>
+<p>This design is driven by actual loader experiments on the Example TP Model weight set
+and exists to close the remaining host-local gap against <code>fastsafetensors</code>
+while preserving TensorCast's selection-first, artifact-first, and
+binding-aware architecture.</p>
+<h2 id="follow-on-execution-contract-below-the-strategy-plane">Follow-on Execution Contract Below the Strategy Plane<a class="headerlink" href="#follow-on-execution-contract-below-the-strategy-plane" title="Permanent link">&para;</a></h2>
+<p><code>0108</code> remains the owner of:</p>
+<ul>
+<li>semantic truth,</li>
+<li>source acquisition,</li>
+<li>execution-environment facts,</li>
+<li>and strategy placement inside <code>MaterializationFacade</code>.</li>
+</ul>
+<p>The generic execution contract below that seam is now explicitly delegated to
+<code>0115</code>.</p>
+<p>That means:</p>
+<ol>
+<li><code>0108</code> may choose a composite execution path, but it does not define the
+   transport-level or direct-write batching contract.</li>
+<li><code>0115</code> owns the shared dataplane extension for composite source -&gt; composite
+   target execution and the routed vectored pull fast path.</li>
+<li>Any consumer, including routed byte-artifact batch-get, must consume that
+   shared execution capability through the <code>0108</code> strategy seam rather than
+   bypassing it with a controller-private RDMA batch API.</li>
+</ol>
+<h1 id="plan-ownership">Plan Ownership<a class="headerlink" href="#plan-ownership" title="Permanent link">&para;</a></h1>
+<p>This design remains the authoritative architectural record for the strategy
+plane, but execution is now intentionally split:</p>
+<ul>
+<li>the request-normalization prerequisite remains owned by
+  <code>docs/designs/0107-retrieval-policy-plane-cleanup.md</code>;</li>
+<li>the mapped-target, semantic-contract, typed-config extraction, and ordinary
+  replica convergence work that previously lived in deleted earlier companion
+  plans is now folded back into this design's implementation record;</li>
+<li>the former standalone <code>0115</code> explicit source-bound planning closure is now
+  folded into this design:</li>
+<li>explicit lane plans,</li>
+<li>semantic-only <code>ResolvedMaterializationPlan</code>,</li>
+<li>and the "no implicit fallback" rule are normative <code>0108</code> ownership now;</li>
+<li>the former standalone <code>0108</code> execution plan has been retired after closure;
+  its final acceptance evidence and closeout record now live directly in this
+  design plus
+  <code>docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md</code>;</li>
+<li>owner-file collective executor rollout, mixed-residual policy, and
+  executor-specific delete gates now live under <code>0109</code> plus
+  <code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code>;</li>
+<li>same-binding serving-path closure, mounted operator evidence, and delete-gate
+  cleanup now live under <code>0112</code> plus
+  <code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code>;</li>
+<li>no separate long-term design owner remains for <code>0113</code>, <code>0114</code>, or <code>0115</code>;
+  their still-relevant normative content must live in the surviving owners named
+  above;</li>
+<li><code>0117</code> remains the normative owner for group version-set realization and the
+  staged publish barrier. It must not be folded back into the strategy plane.</li>
+</ul>
+<h1 id="target-state-alignment-with-0121">Target-State Alignment With <code>0121</code><a class="headerlink" href="#target-state-alignment-with-0121" title="Permanent link">&para;</a></h1>
+<p><code>0108</code> remains the strategy-plane owner below semantic truth. <code>0121</code> lifts that
+role into the unified artifact realization kernel as <code>RealizationStrategyPlan</code>.</p>
+<p>The target interpretation is:</p>
+<ul>
+<li>source policy, P2P/disk choice, collective admission, retry, verification,
+  deadline, lease/export, and fallback policy are strategy-plane facts for every
+  target kind;</li>
+<li>TensorDict, binding, caller-owned target writes, retained prefetch, runtime
+  attach, and TP target sets must not carry separate source/fallback logic;</li>
+<li><code>ExecutionStrategyPlan</code> remains a lower-level core/daemon execution artifact,
+  while <code>RealizationStrategyPlan</code> is the SDK/daemon-controller admission layer
+  that owns consistent behavior before lowering.</li>
+</ul>
+<h1 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h1>
+<p>Partially implemented in this repository:</p>
+<ul>
+<li>core-owned internal strategy-plane contracts now live in
+  <code>core/store/runtime/ingestion/materialization_strategy_types.h</code>:</li>
+<li><code>ResolvedMaterializationPlan</code></li>
+<li><code>RepresentationTransformContract</code></li>
+<li><code>RepresentationWorkPlan</code></li>
+<li><code>ResolvedSourceBinding</code></li>
+<li><code>ExecutionEnvironmentFacts</code></li>
+<li><code>ExecutionStrategyPlan</code></li>
+<li><code>ExecutionCommitReport</code></li>
+<li>ordinary <code>materialize_replica</code> disk startup now reaches a common-runtime
+  strategy seam in <code>MaterializationFacade</code> before final executor choice, and
+  <code>Replica</code> / <code>ReplicaLoadController</code> consume the selected plan rather than
+  owning <code>AUTO</code>.</li>
+<li>mapped-target controller lowering now builds the internal resolved plan and
+  passes it directly into the common runtime as the authoritative semantic
+  contract, with the runtime validating request hints against that plan instead
+  of accepting duplicate semantic inputs.</li>
+<li>source-bound binding startup/refill and ordinary <code>into_target</code> lowering now
+  reuse the same semantic-core family instead of carrying a separate
+  mapped-only builder path.</li>
+<li>typed rollout config now lives under
+  <code>engine.materialization_strategy</code> in
+  <code>proto/tensorcast/config/v1/daemon_config.proto</code> and is mapped into
+  <code>StoreEngineOptions::MaterializationStrategyConfig</code>.</li>
+<li>env-gated mapped/local-batched/owner-file strategy toggles have been removed
+  from the common runtime and replica hot paths.</li>
+<li>partial <code>engine.materialization_strategy</code> config now preserves the documented
+  0108 defaults instead of silently disabling local batched disk load.</li>
+<li>the common-runtime mapped-target path currently lands:</li>
+<li>source acquisition selection,</li>
+<li>shared <code>RepresentationWorkPlan</code> derivation,</li>
+<li>owner-file collective handoff,</li>
+<li>residual generic byte-range fallback.</li>
+<li>ordinary replica local-batched and collective executors now consume shared
+  work-plan items and common-runtime-selected plan ownership instead of
+  recovering semantic truth in executor-local code.</li>
+<li>the current owner-file collective implementation now uses the bounded batched
+  owner-file steady path without eager <code>owned_payload</code> residency or root
+  whole-source preload on the selected route, and ordinary host-local
+  local-batched selection is now driven by a shared planner/executor admission
+  summary rather than a late replica fallback.</li>
+<li>ordinary non-collective <code>into_target</code> still executes through the generic
+  byte-range backend after shared lowering.</li>
+<li><code>ExecutionCommitReport</code> and ordinary strategy-plan diagnostics now apply to
+  ordinary disk startup as well as mapped-target execution, though <code>0109</code> still
+  owns the follow-on batch-level owner-file executor semantics.</li>
+<li>public SDK retrieval APIs remain unchanged.</li>
+</ul>
+<p><code>2026-04-15</code> local closure evidence now exists for the remaining ordinary
+host-local <code>0108</code> scope:</p>
+<ul>
+<li>source model:
+  <code>&lt;public-hf-model-dir&gt;</code></li>
+<li>current <code>vllm</code> TP4 trace output now yields:</li>
+<li><code>773</code> trace entries / rank,</li>
+<li><code>771</code> source-backed copy ops / rank,</li>
+<li>and <code>2</code> fill ops / rank;</li>
+<li>that trace output is now lowered into the benchmark contract through
+  <code>tools/trace_plan_to_load_plan.py</code>;</li>
+<li>current host-local benchmark results on the exact lowered trace workload:</li>
+<li>generic-like <code>B_lazy_commit</code> rank0:
+    <code>T(total_ready)=23.929s</code></li>
+<li>tensor-aware local <code>C_batched_optimal</code>:<ul>
+<li>rank0 <code>T(total_ready)=3.997s</code></li>
+<li>rank1 <code>T(total_ready)=3.835s</code>;</li>
+</ul>
+</li>
+<li>same-machine local references:</li>
+<li><code>vllm</code> TP4 <code>safetensors</code> per-rank weight-loading:
+    <code>15.3918 GiB</code> in about <code>6.907s</code></li>
+<li>stable local <code>fastsafetensors</code> no-GDS iterator reference:
+    full-model <code>61.027 GiB</code> in about <code>14.926s</code>;</li>
+<li>this packet is recorded in
+  <code>docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md</code>.</li>
+</ul>
+<p>Remaining <code>0108</code>-owned work after this implementation is now intentionally
+narrow:</p>
+<ul>
+<li>land the dedicated shared-runtime local tensor-aware executor for the ordinary
+  host-local <code>GPU &lt;- DISK</code> path,</li>
+<li>retire the remaining ordinary-path prototype ownership once that executor
+  closes parity,</li>
+<li>keep source-bound mapped and binding execution on the explicit lane-plan
+  strategy trunk already absorbed here,</li>
+<li>and extend source-bound local execution only if later evidence shows a real
+  remaining gap and only through the same explicit lane-plan model.</li>
+</ul>
+<p><code>0108</code> now closes that remaining source-bound-local question with an explicit
+no-new-work decision:</p>
+<ul>
+<li>no additional dedicated source-bound local executor is needed beyond the
+  current explicit lane-plan trunk,</li>
+<li>any future source-bound local optimization must extend that explicit
+  strategy-owned trunk,</li>
+<li>and mounted serving-ready closure remains outside <code>0108</code> ownership.</li>
+</ul>
+<p>This design no longer owns:</p>
+<ul>
+<li>owner-file collective executor rollout or shared-source defaulting,</li>
+<li>same-binding mounted Example TP Model rollout and delete-gate cleanup,</li>
+<li>or downstream <code>vllm</code> rollout tracking.</li>
+</ul>
+<p>Normative source-bound execution rule after the reorganization:</p>
+<ul>
+<li>source-bound mapped and binding requests must enter runtime with an explicit
+  strategy-owned lane plan,</li>
+<li>runtime must not derive executor behavior from missing optional maps or
+  summary-only fallback,</li>
+<li>and any future source-bound local tensor-aware executor must extend the shared
+  lane-plan model rather than introducing a second mapped fast path.</li>
+</ul>
+<p>Normative sequencing rule:</p>
+<ul>
+<li>no owner-file collective executor may become the default <code>AUTO</code> choice until
+  request normalization, execution-environment facts, ordinary replica strategy
+  ownership, and typed cost-model policy have all converged on the common
+  runtime boundary.</li>
+</ul>
+<pre class="mermaid"><code>flowchart LR
+  A["ArtifactSelection&lt;br&gt;view + subset + target contract"] --&gt; B["Controller Safety Boundary&lt;br&gt;selection validation + region safety + publication policy"]
+  B --&gt; C["ResolvedMaterializationPlan&lt;br&gt;semantic truth"]
+  C --&gt; D["Source Acquisition&lt;br&gt;existing replica or p2p or disk"]
+  D --&gt; E["ExecutionEnvironmentFacts&lt;br&gt;topology + locality + sharing"]
+  E --&gt; F["MaterializationFacade&lt;br&gt;strategy plane"]
+  F --&gt; G["TensorBatchedLocalExecutor"]
+  F --&gt; H["OwnerFileCollectiveExecutor"]
+  F --&gt; I["GenericByteRangeExecutor"]
+  G --&gt; J["final target layout"]
+  H --&gt; J
+  I --&gt; J</code></pre>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>Current TensorCast runtime is too eager to lower selection-aware retrieval into
+generic byte-range execution. This loses tensor semantics early and leaves
+performance on the table for local-disk model loading.</p>
+<p>Observed behavior on the current Example TP Model workload:</p>
+<ul>
+<li>Exact <code>879</code> source-tensor workload on host-local SSD, current TensorCast
+  common collective path: about <code>47s</code> wall at TP=8.</li>
+<li>The same exact <code>879</code> workload in the benchmark's batched-optimal
+  tensor-aware model: about <code>7.2s</code> average ready time, <code>8.4s</code> makespan.</li>
+<li>Exact <code>879</code> single-rank TensorCast common path: about <code>7.1s</code>, already near
+  <code>fastsafetensors</code> exact subset at about <code>7.5s</code>.</li>
+<li>Exact <code>614</code> sliced tensors on host-local SSD:</li>
+<li>TensorCast non-collective exact subset is about <code>10.0s</code>.</li>
+<li><code>fastsafetensors</code> exact subset is about <code>8.7s</code>.</li>
+<li>Real target-layout subset experiments show:</li>
+<li>materialization dominates,</li>
+<li>copy-plan apply is only a few milliseconds,</li>
+<li>current common path still hits <code>disk_fallback -&gt; ByteRangeMappedSource -&gt;
+    pump_ranges</code>, meaning late replica-layer hooks do not intercept the real
+    hot path.</li>
+</ul>
+<p>These results imply:</p>
+<ul>
+<li>TensorCast's single-rank data plane is not the limiting factor.</li>
+<li>The largest host-local gap comes from common-path execution shape:</li>
+<li>repeated disk or view materialization across ranks,</li>
+<li>early lowering to generic byte-range form,</li>
+<li>loss of tensor-aware opportunities such as direct writes, staged 2D pack,
+    and deduplicated source reads.</li>
+</ul>
+<p>There is a second structural issue for mapped-target paths:</p>
+<ul>
+<li>current controller-side <code>build_copy_plan(...)</code> already captures important
+  copy-contract semantics,</li>
+<li>but common runtime still receives executor-shaped hints through
+  <code>MaterializeHints</code>,</li>
+<li>while replica-layer and runtime env-gated prototypes each own different parts
+  of the hot path.</li>
+</ul>
+<p>There is a third structural issue for ordinary replica startup:</p>
+<ul>
+<li>the long-term design says strategy selection belongs in common runtime,</li>
+<li>but current <code>GPU &lt;- DISK</code> ordinary startup still makes key executor choices
+  inside replica-layer <code>collective -&gt; local_batched -&gt; generic</code> branches,</li>
+<li>and the current owner-file prototype remains embedded in
+  <code>collective_disk_loader.cc</code> rather than consuming a shared strategy-plan IR.</li>
+</ul>
+<p>This makes the project inconsistent with its broader architecture:</p>
+<ul>
+<li><code>0078</code> requires one selection contract,</li>
+<li><code>0084</code> separates binding plane from artifact plane,</li>
+<li><code>0087</code> separates <code>ArtifactSelection</code> from copy contract and placement,</li>
+<li><code>0004</code> requires typed runtime config instead of ambient env switches.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Keep <code>ArtifactSelection</code> as the only public selection contract.</li>
+<li>Keep <code>tensor_dict</code>, <code>materialize_view</code>, <code>bind_into</code>, and mapped-target APIs
+  unchanged.</li>
+<li>Move execution strategy selection into the common runtime before irreversible
+  generic byte-range lowering.</li>
+<li>Preserve TensorCast's selection identity, view identity, artifact-first
+  semantics, and binding or target safety boundaries.</li>
+<li>Keep semantic truth separate from:</li>
+<li>source acquisition,</li>
+<li>executor lowering,</li>
+<li>execution topology context,</li>
+<li>rollout policy,</li>
+<li>publication side effects.</li>
+<li>Converge ordinary replica GPU&lt;-DISK startup and target materialization onto
+  the same strategy-plane architecture.</li>
+<li>Make executor choice depend on explicit execution environment facts and typed
+  cost-model policy rather than replica-layer branch order or ambient state.</li>
+<li>Reach host-local performance at or below <code>fastsafetensors</code> for the same
+  end-to-end workload, while preserving current JFS advantages.</li>
+<li>Make the optimization reusable across TensorDict, region-backed materialize,
+  binding-backed loads, and mapped-target flows.</li>
+<li>Retain one generic fallback path with byte-exact semantics.</li>
+<li>Converge rollout controls onto typed runtime config consistent with <code>0004</code>.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Add framework-specific special cases in vLLM.</li>
+<li>Introduce model-name or tensor-name hardcoding into runtime strategy
+  selection.</li>
+<li>Collapse source acquisition and execution strategy into one opaque planner.</li>
+<li>Treat topology/group context as semantic truth or retrieval policy.</li>
+<li>Remove <code>ByteRangeMap</code>, <code>ByteRangeProgram</code>, or <code>ByteRangeMappedSource</code>.</li>
+<li>Redefine selection identity, <code>view_id</code>, <code>view_subset_hash</code>,
+  <code>selection_hash</code>, or <code>logical_layout_hash</code>.</li>
+<li>Change Global Store persistence, routing semantics, or binding-plane
+  authority.</li>
+<li>Permit remote daemons to write directly into caller-owned CUDA regions.</li>
+</ul>
+<h1 id="current-state">Current State<a class="headerlink" href="#current-state" title="Permanent link">&para;</a></h1>
+<h2 id="current-layering">Current layering<a class="headerlink" href="#current-layering" title="Permanent link">&para;</a></h2>
+<p>Current retrieval and materialization flows already have strong semantic
+boundaries, but implementation ownership is split across the wrong layers.</p>
+<p>The relevant path today is:</p>
+<ol>
+<li>SDK and daemon build one <code>ArtifactSelection</code>.</li>
+<li>daemon controller code resolves view identity, selected index bytes,
+   target layout, and mapped-target copy plan shape.</li>
+<li>common runtime often lowers too early into <code>ByteRangeMap</code>,
+   <code>ByteRangeCompiler</code>, and <code>ByteRangeMappedSource</code>.</li>
+<li>late runtime or replica-layer helpers then try to recover tensor-aware or
+   owner-file opportunities.</li>
+<li>ordinary replica startup still performs final executor selection in
+   replica-layer code after common-runtime lowering has already split.</li>
+</ol>
+<p>Important current sites:</p>
+<ul>
+<li>selection-first and target-layout resolution:</li>
+<li><code>daemon/service/controllers/materialization_target_plan_utils.cc</code></li>
+<li>representation-transform shaping:</li>
+<li><code>daemon/service/controllers/representation_transform_builder.cc</code></li>
+<li>source acquisition for replica materialization:</li>
+<li><code>core/store/runtime/ingestion/materialization_service.cc</code></li>
+<li>generic lowering and mapped-target execution:</li>
+<li><code>core/store/runtime/ingestion/materialization_facade.cc</code></li>
+<li>late prototype collective and local-batched paths:</li>
+<li><code>core/store/replica/collective_disk_loader.cc</code></li>
+<li>ordinary replica branch ordering and fallback:</li>
+<li><code>core/store/replica/replica.cc</code></li>
+<li><code>core/store/replica/replica_load_controller.cc</code></li>
+</ul>
+<h2 id="why-the-current-shape-is-insufficient">Why the current shape is insufficient<a class="headerlink" href="#why-the-current-shape-is-insufficient" title="Permanent link">&para;</a></h2>
+<p><code>ByteRangeMap</code> is the correct canonical fallback IR, but it does not preserve
+enough high-level information to choose the most efficient data path for common
+weight-loading cases. In particular it does not naturally express:</p>
+<ul>
+<li>tensor boundaries,</li>
+<li>contiguous dim0 slices,</li>
+<li>staged 2D dim1 pack opportunities,</li>
+<li>repeated-source dedup opportunities,</li>
+<li>owner-file or owner-segment collective ownership,</li>
+<li>direct-write-to-final-layout opportunities as first-class plan items.</li>
+</ul>
+<p>The ordinary replica path has a parallel problem:</p>
+<ul>
+<li>shared <code>RepresentationWorkPlan</code> lowering already exists,</li>
+<li>but the final strategy decision still depends on replica-layer branch order,</li>
+<li>so cost-model-driven <code>AUTO</code> selection cannot yet evaluate all executors from
+  one shared planning boundary.</li>
+</ul>
+<p>The mapped-target prototype has a second issue:</p>
+<ul>
+<li>current <code>BuildCopyPlanResult</code> usefully captures copy-contract truth and
+  compatibility analysis in one place,</li>
+<li>but it also mixes semantic information with executor-candidate artifacts such
+  as tensor-job and concat-job compatibility,</li>
+<li>and those executor artifacts are then serialized through generic
+  <code>MaterializeHints</code>.</li>
+</ul>
+<p>By the time requests reach replica or load-controller hooks, the runtime has
+already committed to a generic execution path or to a prototype-specific hint
+shape.</p>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-long-term-layered-model">1. Long-term layered model<a class="headerlink" href="#1-long-term-layered-model" title="Permanent link">&para;</a></h2>
+<p>TensorCast should make the following layers explicit.</p>
+<h3 id="11-controller-safety-boundary">1.1 Controller safety boundary<a class="headerlink" href="#11-controller-safety-boundary" title="Permanent link">&para;</a></h3>
+<p>The daemon controller layer remains authoritative for:</p>
+<ul>
+<li>request validation,</li>
+<li>selection parsing and response shaping,</li>
+<li>caller-owned region safety,</li>
+<li>capability-token and publication-token policy,</li>
+<li>target poison or retire semantics,</li>
+<li>local-only enforcement for external targets.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>strategy-plane work must not move external-target safety, publication-token
+  minting, or region-poison semantics out of controller-owned boundaries.</li>
+</ul>
+<h3 id="12-semantic-resolution-plane">1.2 Semantic resolution plane<a class="headerlink" href="#12-semantic-resolution-plane" title="Permanent link">&para;</a></h3>
+<p>The runtime must consume one resolved semantic plan before strategy selection.</p>
+<p>Introduce one core-owned internal semantic plan family:</p>
+<ul>
+<li><code>ResolvedMaterializationPlan</code></li>
+</ul>
+<p>This is an internal core/runtime construct. It is not a public SDK or proto
+contract.</p>
+<p><code>ResolvedMaterializationPlan</code> carries semantic truth only:</p>
+<ul>
+<li>resolved <code>ArtifactSelection</code>,</li>
+<li>resolved <code>view_id</code>,</li>
+<li>optional <code>ViewPlan</code>,</li>
+<li>selected index bytes,</li>
+<li>target placement contract,</li>
+<li>copy contract,</li>
+<li>verification and publication requirements that affect correctness.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>semantic truth remains separate from executor choice,</li>
+<li>semantic truth remains separate from source acquisition,</li>
+<li>semantic truth remains separate from rollout policy.</li>
+</ul>
+<h2 id="2-representation-transform-boundary">2. Representation-transform boundary<a class="headerlink" href="#2-representation-transform-boundary" title="Permanent link">&para;</a></h2>
+<p>This design aligns with <code>0087</code>, which treats transform semantics as distinct
+from selection and placement.</p>
+<h3 id="21-canonical-or-view-into-target">2.1 Canonical or view into-target<a class="headerlink" href="#21-canonical-or-view-into-target" title="Permanent link">&para;</a></h3>
+<p>For <code>MaterializeIntoTarget</code>, the semantic contract may be trivial:</p>
+<ul>
+<li>resolved selected ByteSpace,</li>
+<li>coalesced <code>IntoTargetLayout</code>,</li>
+<li>exact destination coverage.</li>
+</ul>
+<h3 id="22-mapped-target">2.2 Mapped-target<a class="headerlink" href="#22-mapped-target" title="Permanent link">&para;</a></h3>
+<p>For <code>MaterializeIntoMappedTarget</code>, the semantic contract must preserve more than
+flat target storage spans.</p>
+<ul>
+<li><code>RepresentationTransformContract</code></li>
+</ul>
+<p>The long-term semantic family must preserve:</p>
+<ul>
+<li>source and destination tensor specs,</li>
+<li>range and dim semantics,</li>
+<li>view-narrow context when applicable,</li>
+<li>exact destination coverage,</li>
+<li>canonical residual fallback coverage.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>flattening mapped-target requests to <code>IntoTargetLayout</code> alone is insufficient,</li>
+<li>mapped-target semantic truth must stay richer than executor hints,</li>
+<li>executor-private tensor or concat candidate jobs must not be the long-term
+  shared runtime contract.</li>
+</ul>
+<p>Required migration interpretation:</p>
+<ul>
+<li>current daemon <code>TargetMaterializationPlan</code> and
+  <code>MappedTargetMaterializationPlan</code> are useful prototypes of semantic
+  resolution,</li>
+<li>current <code>BuildCopyPlanResult</code> is a useful prototype but mixes two concerns:</li>
+<li>semantic transform contract,</li>
+<li>executor compatibility analysis,</li>
+<li>long term, normalized representation-transform semantics belong in a
+  core-owned internal contract library, while executor compatibility analysis
+  belongs in the strategy plane.</li>
+</ul>
+<p>Phase boundary rule:</p>
+<ul>
+<li>physical topology, participant assignment, communicator routing, and
+  topology-scoped reshard execution remain follow-on work above this semantic
+  seam rather than part of the first <code>0108</code> convergence wave.</li>
+</ul>
+<h2 id="3-source-acquisition-plane">3. Source acquisition plane<a class="headerlink" href="#3-source-acquisition-plane" title="Permanent link">&para;</a></h2>
+<p>Source acquisition remains a distinct phase.</p>
+<p>Introduce one internal runtime source-binding concept:</p>
+<ul>
+<li><code>ResolvedSourceBinding</code></li>
+</ul>
+<p><code>ResolvedSourceBinding</code> represents an acquired source and its capabilities:</p>
+<ul>
+<li>local existing replica or alias,</li>
+<li>P2P transport,</li>
+<li>disk or local file source,</li>
+<li>source-layout availability,</li>
+<li>direct-write capability,</li>
+<li>verification facts already attached to the source.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>source acquisition must happen before execution strategy lowering,</li>
+<li>source acquisition must not depend on tensor-name heuristics alone,</li>
+<li><code>MaterializationService</code> remains the owner of the existing source-acquisition
+  chain for replica materialization,</li>
+<li>short term, <code>MaterializationFacade</code> may still own some source-acquisition
+  mechanics for into-target flows, but the architecture must make the boundary
+  explicit.</li>
+</ul>
+<p>Required interpretation:</p>
+<ul>
+<li>selection and copy contract describe what bytes are needed,</li>
+<li>source acquisition describes where those bytes will come from,</li>
+<li>strategy selection describes how those bytes will be moved and packed.</li>
+</ul>
+<h3 id="31-execution-environment-facts">3.1 Execution environment facts<a class="headerlink" href="#31-execution-environment-facts" title="Permanent link">&para;</a></h3>
+<p>Introduce one internal runtime context family:</p>
+<ul>
+<li><code>ExecutionEnvironmentFacts</code></li>
+</ul>
+<p><code>ExecutionEnvironmentFacts</code> captures executor-relevant context that is neither
+semantic truth nor retrieval policy:</p>
+<ul>
+<li>collective group or equivalent topology context when present,</li>
+<li>whether the source media is host-local, shared-source, or unknown,</li>
+<li>source-sharing domain or dedup domain when known,</li>
+<li>planner-cache and budget-relevant capabilities,</li>
+<li>coordinator availability and executor-specific memory budgets.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>execution environment facts are derived after request normalization and source
+  acquisition,</li>
+<li>execution environment facts must not modify selection identity or copy truth,</li>
+<li>execution environment facts are separate from <code>RetrievalPolicy</code> as described
+  by <code>0107</code>,</li>
+<li><code>AUTO</code> executor choice must consume explicit environment facts rather than
+  ambient process state.</li>
+</ul>
+<h2 id="4-strategy-plane-placement">4. Strategy plane placement<a class="headerlink" href="#4-strategy-plane-placement" title="Permanent link">&para;</a></h2>
+<p>The strategy plane lives in <code>MaterializationFacade</code>, not in client code and not
+in late replica-layer helpers.</p>
+<p><code>MaterializationFacade</code> owns lowering from:</p>
+<ul>
+<li><code>ResolvedMaterializationPlan</code>,</li>
+<li><code>ResolvedSourceBinding</code>,</li>
+<li><code>ExecutionEnvironmentFacts</code>,</li>
+<li>typed rollout policy,</li>
+</ul>
+<p>into one internal executor-lowered family:</p>
+<ul>
+<li><code>ExecutionStrategyPlan</code></li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>strategy selection must happen before the request is irreversibly lowered into
+  generic <code>ByteRangeMap</code> / <code>ByteRangeMappedSource</code> execution for all ranges.</li>
+</ul>
+<p>Required convergence rule:</p>
+<ul>
+<li>ordinary <code>materialize_replica</code> GPU&lt;-DISK startup, <code>MaterializeIntoTarget</code>,
+  and <code>MaterializeIntoMappedTarget</code> must all reach the same strategy-plane
+  boundary before executor choice,</li>
+<li>current replica-layer <code>collective -&gt; local_batched -&gt; generic</code> ordering is
+  temporary migration scaffolding, not the long-term owner of <code>AUTO</code>
+  selection.</li>
+</ul>
+<h3 id="41-cost-model-and-plan-cache">4.1 Cost model and plan cache<a class="headerlink" href="#41-cost-model-and-plan-cache" title="Permanent link">&para;</a></h3>
+<p><code>AUTO</code> strategy choice must be an explicit cost-model decision, not executor
+trial order.</p>
+<p>The planner may estimate at least:</p>
+<ul>
+<li>requested source bytes,</li>
+<li>unique source bytes after dedup,</li>
+<li>dim1 or staging amplification,</li>
+<li>peer-transfer bytes,</li>
+<li>owner skew or per-rank load skew,</li>
+<li>planner overhead and batch count,</li>
+<li>peak temporary memory for each candidate.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>typed config may influence thresholds, budgets, and preference ordering,</li>
+<li>cost-model policy may change executor candidacy but must not change semantic
+  truth,</li>
+<li>strategy planning may use cacheable derived state keyed by semantic identity
+  plus execution environment facts,</li>
+<li>planner cache is an optimization only; cache miss must not change semantics.</li>
+</ul>
+<h2 id="5-execution-model">5. Execution model<a class="headerlink" href="#5-execution-model" title="Permanent link">&para;</a></h2>
+<h3 id="51-mixed-execution-is-allowed-but-it-must-be-explicit">5.1 Mixed execution is allowed, but it must be explicit<a class="headerlink" href="#51-mixed-execution-is-allowed-but-it-must-be-explicit" title="Permanent link">&para;</a></h3>
+<p>This design rejects the assumption that every request must choose exactly one
+executor for all bytes.</p>
+<p>One request may use mixed execution:</p>
+<ul>
+<li>collective lane for typed work admitted to owner-file collective or a later
+  collective executor,</li>
+<li>local typed lane for cheap target-semantic typed work such as fill or pad,</li>
+<li>deferred typed lane for work that remains typed in the shared plan even when a
+  preferred executor rejects it,</li>
+<li>generic residual lane for bytes with no typed execution equivalent.</li>
+</ul>
+<p>This is the preferred long-term model because it preserves correctness while
+allowing near-optimal execution on irregular workloads.</p>
+<p>Current phase rule:</p>
+<ul>
+<li>mixed execution is only valid when the strategy plane emits explicit lane
+  allocation plus residual accounting before execution begins,</li>
+<li>executors must not partially execute a request and then implicitly reconstruct
+  the remaining generic fallback ranges at runtime,</li>
+<li>if a current executor cannot consume a request without such implicit widening,
+  that executor is not eligible for that request.</li>
+<li>bytes may enter the generic residual lane only when no typed execution
+  equivalent exists for them.</li>
+</ul>
+<h3 id="52-lane-planning-sits-between-typed-work-and-executor-private-ops">5.2 Lane planning sits between typed work and executor-private ops<a class="headerlink" href="#52-lane-planning-sits-between-typed-work-and-executor-private-ops" title="Permanent link">&para;</a></h3>
+<p><code>ExecutionStrategyPlan</code> should first allocate the shared typed work inventory
+into explicit strategy-owned lanes.</p>
+<p>Representative lane families:</p>
+<ul>
+<li>collective lane</li>
+<li>typed items admitted to collective execution</li>
+<li>local typed lane</li>
+<li>typed items executed by a local typed backend</li>
+<li>deferred typed lane</li>
+<li>typed items that keep typed identity in the shared plan while a later
+    backend-specific lowering chooses how to run them</li>
+<li>generic residual lane</li>
+<li>byte ranges with no typed execution equivalent</li>
+</ul>
+<p>Only after lane allocation may the runtime derive executor-private ops such as:</p>
+<ul>
+<li>direct span reads</li>
+<li>staged pack jobs</li>
+<li>peer scatter jobs</li>
+<li>batch-local dedup jobs</li>
+<li>generic byte-range fallback ops</li>
+</ul>
+<p>The common runtime may still expose dominant executor labels for diagnostics:</p>
+<ul>
+<li><code>TensorBatchedLocalExecutor</code></li>
+<li><code>OwnerFileCollectiveExecutor</code></li>
+<li><code>GenericByteRangeExecutor</code></li>
+</ul>
+<p>But those labels are diagnostic summaries, not an architectural requirement that
+all bytes in a request use only one executor.</p>
+<p>A future topology-scoped or group-reshard executor may later be added to this
+family, but it must still consume the same normalized semantic contract rather
+than recreate a second semantic stack.</p>
+<h2 id="6-single-semantic-truth-and-residual-coverage">6. Single semantic truth and residual coverage<a class="headerlink" href="#6-single-semantic-truth-and-residual-coverage" title="Permanent link">&para;</a></h2>
+<p>The strategy plane introduces new internal contracts, but it does not introduce
+a second semantic truth.</p>
+<p>Normative rules:</p>
+<ul>
+<li><code>ArtifactSelection</code>, resolved <code>view_id</code>, resolved <code>ViewPlan</code>, resolved copy
+  contract, and final target layout remain the only semantic truth for what
+  bytes must appear in the destination.</li>
+<li>typed work inventory and later lane allocation remain shared derived artifacts.
+  They do not replace the resolved selection or copy-contract truth.</li>
+<li>executor-private plans are derived below lane allocation. They must not
+  replace either semantic truth or strategy-owned lane truth.</li>
+<li>every execution strategy plan must carry explicit residual accounting:</li>
+<li>which typed items are assigned to collective, local typed, or deferred typed
+    lanes,</li>
+<li>which destination byte ranges remain residual and must be executed via
+    generic byte-range fallback.</li>
+<li>the planner may exclude a byte range from generic fallback only if it has
+  emitted a semantically equivalent internal op for that range.</li>
+<li>the runtime may mark a byte range as completed only after the chosen executor
+  has successfully committed that range.</li>
+<li>bytes associated with a typed work item must not be relabeled as residual only
+  because a preferred executor rejected them.</li>
+</ul>
+<p>Introduce one internal reporting contract:</p>
+<ul>
+<li><code>ExecutionCommitReport</code></li>
+</ul>
+<p><code>ExecutionCommitReport</code> exists to report:</p>
+<ul>
+<li>committed ranges,</li>
+<li>lane allocation summary,</li>
+<li>residual fallback ranges,</li>
+<li>executor path actually used,</li>
+<li>explicit fallback work chosen during planning.</li>
+</ul>
+<p>Normative reporting split:</p>
+<ul>
+<li>planner-owned lane intent, reject buckets, and cost estimates belong in a
+  source-bound-scoped planner diagnostics contract,</li>
+<li><code>ExecutionCommitReport</code> remains the carrier for actual execution facts and
+  backend reality.</li>
+</ul>
+<p>Commit semantics must also be explicit:</p>
+<ul>
+<li>each non-generic executor must define its commit unit,</li>
+<li>a commit unit is complete only when all destination bytes in that unit are
+  visible and semantically equivalent to the resolved request,</li>
+<li>temporary staging lifetime must extend until commit of the covered unit,</li>
+<li>failed units remain uncommitted and must follow explicit retry, poison, or
+  fallback policy.</li>
+</ul>
+<p>Required interpretation:</p>
+<ul>
+<li>feature gating or rollout gating may change executor candidacy,</li>
+<li>feature gating may not change requested byte semantics,</li>
+<li>disabling one executor path must only increase explicitly planned fallback
+  work, never suppress required bytes,</li>
+<li>runtime execution must not invent new fallback ranges that were not already
+  present in the emitted execution plan.</li>
+</ul>
+<h3 id="61-coordinator-boundary">6.1 Coordinator boundary<a class="headerlink" href="#61-coordinator-boundary" title="Permanent link">&para;</a></h3>
+<p>Group assembly, clique lifecycle, and participant synchronization are part of a
+shared runtime coordination boundary, not executor-private semantic truth.</p>
+<p>Normative rules:</p>
+<ul>
+<li>executor planning may depend on coordinator capabilities,</li>
+<li>coordinator state must not redefine what bytes are required,</li>
+<li>group timeout and fail-open or fail-closed behavior must be typed policy, not
+  hard-coded runtime folklore,</li>
+<li>future owner-file collective and topology-scoped reshard executors should
+  reuse one coordination surface rather than open-coding their own group state
+  machines.</li>
+</ul>
+<h2 id="7-relationship-to-byterangemap">7. Relationship to <code>ByteRangeMap</code><a class="headerlink" href="#7-relationship-to-byterangemap" title="Permanent link">&para;</a></h2>
+<p><code>ByteRangeMap</code> remains part of the architecture, but its role changes:</p>
+<ul>
+<li>it remains the canonical generic fallback IR,</li>
+<li>it remains the verification and explainability surface for residual ranges,</li>
+<li>it remains the execution IR for rare or irregular cases,</li>
+<li>it remains the canonical fallback for mapped-target residual coverage,</li>
+<li>it is no longer the mandatory primary IR for every common weight-loading
+  request.</li>
+</ul>
+<p>This is consistent with <code>docs/internals/byte-range-mapping-and-execution.md</code>,
+which already defines <code>ByteRangeMap</code> as a generic byte-level IR rather than the
+only possible planning abstraction.</p>
+<h2 id="8-relationship-to-current-staged-mapped-target-fast-path">8. Relationship to current staged mapped-target fast path<a class="headerlink" href="#8-relationship-to-current-staged-mapped-target-fast-path" title="Permanent link">&para;</a></h2>
+<p>This design rejects the experimental boundary shape where controller-derived
+tensor jobs or concat jobs are propagated through generic runtime hints and
+consumed by one backend-specific executor.</p>
+<p>That experimental shape has three structural problems:</p>
+<ul>
+<li>it makes backend-specific execution jobs look like shared request truth,</li>
+<li>it loses the richer mapped-target copy-contract semantics needed for long-term
+  reuse,</li>
+<li>it encourages coverage subtraction at the wrong layer, which can make rollout
+  or debug switches accidentally suppress fallback bytes.</li>
+</ul>
+<p>Normative rules:</p>
+<ul>
+<li>executor-private plan items must not be serialized into SDK-visible or
+  daemon-wire-visible request contracts,</li>
+<li>generic runtime contracts such as <code>MaterializeHints</code> must carry source,
+  placement, transport, verification, and policy facts, not executor-lowered
+  tensor jobs,</li>
+<li>mapped-target controller code may still validate copy-plan coverage and
+  normalize request-local facts,</li>
+<li>but long-term mapped copy-contract truth must move into core-owned internal
+  contracts,</li>
+<li>tensor-aware lowering must happen in the strategy plane inside
+  <code>MaterializationFacade</code>.</li>
+</ul>
+<h2 id="9-public-api-and-safety-invariants">9. Public API and safety invariants<a class="headerlink" href="#9-public-api-and-safety-invariants" title="Permanent link">&para;</a></h2>
+<p>The following public invariants remain unchanged:</p>
+<ul>
+<li><code>ArtifactSelection</code> is still the only selection envelope.</li>
+<li><code>view_id</code>, <code>view_subset_hash</code>, <code>selection_hash</code>, and
+  <code>logical_layout_hash</code> semantics do not change.</li>
+<li><code>tensor_dict</code>, <code>materialize_view</code>, <code>bind_into</code>, and
+  <code>MaterializeIntoMappedTarget</code> retain their current public API shapes.</li>
+<li>planner and executor selection are daemon or runtime-owned and are not
+  exposed to the caller.</li>
+</ul>
+<h3 id="91-external-target-and-binding-safety">9.1 External-target and binding safety<a class="headerlink" href="#91-external-target-and-binding-safety" title="Permanent link">&para;</a></h3>
+<p>The following safety invariants remain mandatory:</p>
+<ul>
+<li>caller-owned CUDA regions remain a local external-target boundary,</li>
+<li>remote or home daemons never write directly into caller-owned CUDA regions,</li>
+<li><code>DataLoss</code> during target materialization continues to poison the target
+  region,</li>
+<li><code>target_publication_token</code> may be minted only after local target write
+  success and any configured verification gate has passed,</li>
+<li>binding-plane authority and assembly-plane promotion semantics from <code>0084</code>
+  and <code>0087</code> do not change.</li>
+</ul>
+<h2 id="10-runtime-configuration-and-rollout-controls">10. Runtime configuration and rollout controls<a class="headerlink" href="#10-runtime-configuration-and-rollout-controls" title="Permanent link">&para;</a></h2>
+<p>Runtime adoption still needs rollout controls, but those controls must follow
+the repository's unified configuration direction from <code>0004</code>.</p>
+<p>Normative rules:</p>
+<ul>
+<li>production strategy-plane controls must use typed runtime configuration and
+  explicit policy fields, not ad-hoc environment variables,</li>
+<li>benchmark binaries may expose ad-hoc experimental toggles locally, but common
+  daemon or runtime process behavior must not depend on ambient environment for
+  semantic decisions,</li>
+<li>rollout controls may gate executor eligibility, diagnostics verbosity, and
+  default preference ordering, budgets, and topology-related thresholds,</li>
+<li>rollout controls must not alter selection identity, copy-contract semantics,
+  target-layout semantics, or residual fallback correctness.</li>
+</ul>
+<p>Recommended configuration direction:</p>
+<ul>
+<li>extend <code>tensorcast.config.v1.DaemonConfig.engine</code> with one typed strategy
+  subsection, for example <code>MaterializationStrategy</code>,</li>
+<li>keep executor enablement, mixed-execution policy, diagnostics verbosity,
+  owner-collective policy, and cost-model budgets under that typed config,</li>
+<li>remove common-runtime dependency on ambient env switches once the typed
+  controls exist.</li>
+</ul>
+<h2 id="11-observability">11. Observability<a class="headerlink" href="#11-observability" title="Permanent link">&para;</a></h2>
+<p>The strategy plane must integrate with the existing runtime observability model
+rather than invent a second ad-hoc logging channel.</p>
+<p>Required diagnostics:</p>
+<ul>
+<li>resolved selection and copy-contract summary,</li>
+<li>acquired source kind and source-layout facts,</li>
+<li>execution environment facts and topology/locality summary,</li>
+<li>lane allocation summary,</li>
+<li>dominant executor label,</li>
+<li>op mix,</li>
+<li>residual fallback bytes,</li>
+<li>committed bytes by executor,</li>
+<li>reason for widened fallback.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>strategy-plane observability should reuse existing ingestion and target
+  materialization event surfaces wherever possible, with additional structured
+  decision fields rather than parallel bespoke logs.</li>
+</ul>
+<h2 id="12-naming-compliance">12. Naming Compliance<a class="headerlink" href="#12-naming-compliance" title="Permanent link">&para;</a></h2>
+<p>This design introduces internal interfaces only. The proposed names follow the
+repository style rules.</p>
+<ul>
+<li>Classes or structs:</li>
+<li><code>ResolvedMaterializationPlan</code></li>
+<li><code>RepresentationDescriptor</code></li>
+<li><code>RepresentationTensorBinding</code></li>
+<li><code>RepresentationTransformContract</code></li>
+<li><code>ResolvedSourceBinding</code></li>
+<li><code>ExecutionEnvironmentFacts</code></li>
+<li><code>ExecutionStrategyPlan</code></li>
+<li><code>ExecutionCommitReport</code></li>
+<li><code>DeferredTypedLane</code></li>
+<li><code>TensorBatchedLocalExecutor</code></li>
+<li><code>OwnerFileCollectiveExecutor</code></li>
+<li><code>GenericByteRangeExecutor</code></li>
+<li><code>MaterializationStrategy</code></li>
+<li>Functions or methods:</li>
+<li><code>build_resolved_materialization_plan</code></li>
+<li><code>build_representation_transform_contract</code></li>
+<li><code>acquire_resolved_source_binding</code></li>
+<li><code>build_execution_environment_facts</code></li>
+<li><code>build_execution_strategy_plan</code></li>
+<li><code>estimate_execution_strategy_cost</code></li>
+<li><code>emit_execution_commit_report</code></li>
+<li><code>execute_owner_file_collective</code></li>
+<li><code>allocate_execution_lanes</code></li>
+<li>Config fields:</li>
+<li><code>enable_local_tensor_execution</code></li>
+<li><code>enable_owner_file_collective</code></li>
+<li><code>allow_mixed_execution</code></li>
+<li><code>allow_deferred_typed_execution</code></li>
+<li><code>diagnostics_verbosity</code></li>
+</ul>
+<h2 id="13-migration-constraints">13. Migration Constraints<a class="headerlink" href="#13-migration-constraints" title="Permanent link">&para;</a></h2>
+<p>The first implementation wave should treat the current mapped-target fast-path
+and replica-layer execution hooks as prototypes to be reabsorbed, not as the
+permanent interface.</p>
+<p>Required migration order:</p>
+<ol>
+<li>define core-owned internal semantic contracts,</li>
+<li>replace mapped-target prototype copy-contract naming with normalized
+   representation-transform semantics,</li>
+<li>split executor compatibility analysis out of the shared semantic contract,</li>
+<li>make source-acquisition inputs explicit,</li>
+<li>introduce <code>ExecutionEnvironmentFacts</code> as a separate strategy input,</li>
+<li>converge ordinary replica executor choice into <code>MaterializationFacade</code>,</li>
+<li>add strategy-plane lowering in <code>MaterializationFacade</code>,</li>
+<li>keep <code>ByteRangeMap</code> fallback exact and always available,</li>
+<li>re-express current useful fast-path ideas as internal executor behavior,</li>
+<li>remove executor-private request hints from shared runtime contracts,</li>
+<li>defer topology-scoped participant execution to a follow-on design until the
+   semantic core is authoritative.</li>
+</ol>
+<h3 id="131-mapped-target-specific-rules">13.1 Mapped-target specific rules<a class="headerlink" href="#131-mapped-target-specific-rules" title="Permanent link">&para;</a></h3>
+<ul>
+<li>controller keeps request validation, region safety, capability handling, and
+  target-publication policy,</li>
+<li>core-owned semantic contracts carry mapped-target copy-contract truth,</li>
+<li>strategy plane derives tensor-aware execution from resolved metadata, copy
+  contract, and source capabilities,</li>
+<li>generic fallback remains explainable in terms of canonical residual lowering.</li>
+</ul>
+<h3 id="132-hard-cut-cleanup-policy">13.2 Hard-cut cleanup policy<a class="headerlink" href="#132-hard-cut-cleanup-policy" title="Permanent link">&para;</a></h3>
+<p>TensorCast does not yet have a production compatibility burden for these
+experiments. Therefore <code>0108</code> should end in cleanup, not in permanent
+coexistence.</p>
+<p>Normative rules:</p>
+<ul>
+<li>late-hook and prototype execution paths are temporary migration scaffolding,
+  not long-term architecture,</li>
+<li>once the strategy plane is authoritative for a workload family, the old
+  prototype path for that family should be removed rather than kept behind
+  compatibility switches,</li>
+<li>ambient env toggles used only to preserve prototype coexistence must be
+  removed from common runtime code after the new path is proven.</li>
+</ul>
+<p>Required cleanup sequence:</p>
+<ol>
+<li>retire replica-layer local-batched late hooks once equivalent behavior exists
+   in the strategy plane,</li>
+<li>retire naive owner-file preload prototypes once owner-file collective is
+   represented as a real planner plus executor path,</li>
+<li>retire root whole-source preload and eager <code>owned_payload</code> preload from the
+   default collective candidate set once batched owner execution exists,</li>
+<li>retire mapped fast-path env policy switches after mapped-target lowering is
+   reabsorbed into common runtime planning,</li>
+<li>converge any remaining generic fallback execution overrides only after the
+   new strategy plane has replaced prototype coexistence,</li>
+<li>remove executor-shaped fields from <code>MaterializeHints</code> once core-owned
+   semantic contracts are authoritative.</li>
+</ol>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<h2 id="benefits">Benefits<a class="headerlink" href="#benefits" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Preserves TensorCast's artifact-first, selection-first, and binding-aware
+  abstractions.</li>
+<li>Makes tensor-aware execution reusable across retrieval surfaces.</li>
+<li>Aligns with <code>0087</code> copy-contract semantics instead of creating a parallel
+  planner object model.</li>
+<li>Avoids framework-local patches.</li>
+<li>Enables a principled path to match or exceed <code>fastsafetensors</code> on host-local
+  block devices while preserving existing JFS wins.</li>
+</ul>
+<h2 id="costs">Costs<a class="headerlink" href="#costs" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Introduces new internal contract boundaries.</li>
+<li>Requires moving some semantic contracts out of daemon-controller ownership and
+  into core-owned internal modules.</li>
+<li>Requires careful equivalence validation against the generic path.</li>
+<li>Requires runtime diagnostics that distinguish semantic resolution, source
+  acquisition, planner choice, and executor performance.</li>
+</ul>
+<h2 id="risks">Risks<a class="headerlink" href="#risks" title="Permanent link">&para;</a></h2>
+<ul>
+<li>planner may be integrated too late and fail to intercept the real hot path,</li>
+<li>contract extraction may stop halfway and leave semantic truth split across
+  daemon utilities and runtime hints,</li>
+<li>collective ownership may reduce read bytes but still lose on end-to-end
+  latency if it overuses staging or synchronization,</li>
+<li>planner complexity could creep into model-specific heuristics if naming or
+  shape shortcuts are allowed,</li>
+<li>external-target safety could regress if collective execution is allowed to
+  bypass local-daemon write boundaries.</li>
+</ul>
+<p>Mitigations:</p>
+<ul>
+<li>planner must be expressed purely in terms of metadata, normalized
+  representation-transform semantics, and source facts, not model names,</li>
+<li>semantic contract extraction must precede hint cleanup,</li>
+<li>planner must emit explicit fallback ops for anything not proven safe,</li>
+<li>executor coverage reporting must be derived from actual committed plan items,
+  not from feature-flag intent,</li>
+<li>all new executors must be benchmarked against the current common path and
+  <code>fastsafetensors</code> on exact workloads before becoming default,</li>
+<li>external-target regressions must be covered with explicit local-only, poison,
+  and publication-token tests.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<h2 id="compatibility">Compatibility<a class="headerlink" href="#compatibility" title="Permanent link">&para;</a></h2>
+<ul>
+<li>No persistence or Global Store schema changes.</li>
+<li>Public retrieval and target-materialization APIs do not change.</li>
+<li>Selection identity semantics do not change.</li>
+<li>Existing generic materialization remains the correctness fallback.</li>
+<li>A runtime config proto extension is expected for typed rollout policy.</li>
+</ul>
+<h2 id="acceptance-criteria">Acceptance Criteria<a class="headerlink" href="#acceptance-criteria" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Correctness:</li>
+<li>tensor-aware execution produces byte-identical outputs to the current
+    generic path on exact trace workloads and real target-layout subsets,</li>
+<li>disabling any one executor or rollout control leaves byte-correct residual
+    fallback coverage intact,</li>
+<li>one request may mix tensor-aware and generic fallback execution without
+    semantic drift,</li>
+<li>end-to-end <code>vllm serve</code> responses remain correct on both host-local SSD and
+    JFS.</li>
+<li>Architecture:</li>
+<li>strategy selection occurs in common runtime, not in vLLM integration code
+    and not as a late replica-layer patch,</li>
+<li>source acquisition remains explicit and distinct from execution strategy,</li>
+<li>execution environment facts remain explicit and distinct from both
+    retrieval policy and semantic truth,</li>
+<li>common runtime consumes a core-owned semantic plan instead of
+    controller-private or hint-private execution artifacts,</li>
+<li>ordinary replica GPU&lt;-DISK startup no longer performs final <code>AUTO</code>
+    strategy choice in replica-layer branch ordering,</li>
+<li>mapped-target copy-contract truth no longer relies on
+    <code>MaterializeHints.mapped_tensor_jobs</code> or
+    <code>MaterializeHints.mapped_concat_jobs</code>,</li>
+<li><code>ByteRangeMap</code> remains the fallback IR, not the only planner IR,</li>
+<li>executor-private plan items do not become public SDK, proto, or generic
+    runtime request contract,</li>
+<li>prototype-only late hooks, preload paths, and env compatibility switches are
+    removed once the strategy plane is authoritative.</li>
+<li>Safety:</li>
+<li>caller-owned external-target writes remain local-daemon only,</li>
+<li><code>DataLoss</code> on target materialization still poisons target regions,</li>
+<li><code>target_publication_token</code> is minted only after successful local write and
+    any configured verification gate.</li>
+<li>Rollout:</li>
+<li>common runtime strategy controls use typed config, not ambient env,</li>
+<li>decision and residual coverage diagnostics are emitted through the existing
+    runtime observability model.</li>
+<li>Performance:</li>
+<li>after the owner split, <code>0108</code> host-local graduation is demonstrated on the
+    current ordinary trace-backed workload family rather than on mounted
+    serving-ready paths owned by <code>0112</code>,</li>
+<li>the ordinary host-local tensor-aware local path must reach parity with or
+    better than the current local baseline envelope for the same current
+    workload family,</li>
+<li>JFS end-to-end TensorCast must not regress relative to the current best
+    common-path behavior.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><a href="./docs/designs/0001-docs-system-design.md"><code>docs/designs/0001-docs-system-design.md</code></a></li>
+<li><a href="./docs/designs/0004-unified-runtime-config.md"><code>docs/designs/0004-unified-runtime-config.md</code></a></li>
+<li><a href="./docs/designs/0107-retrieval-policy-plane-cleanup.md"><code>docs/designs/0107-retrieval-policy-plane-cleanup.md</code></a></li>
+<li><a href="./docs/designs/0078-selection-first-artifact-retrieval.md"><code>docs/designs/0078-selection-first-artifact-retrieval.md</code></a></li>
+<li><a href="./docs/designs/0084-binding-unified-model-and-contract.md"><code>docs/designs/0084-binding-unified-model-and-contract.md</code></a></li>
+<li><a href="./docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md"><code>docs/designs/0087-unified-artifact-runtime-and-routed-byte-artifact-architecture.md</code></a></li>
+<li><a href="./docs/designs/0109-batched-owner-file-collective-executor.md"><code>docs/designs/0109-batched-owner-file-collective-executor.md</code></a></li>
+<li><a href="./docs/designs/0112-binding-native-serving-realization-and-publication.md"><code>docs/designs/0112-binding-native-serving-realization-and-publication.md</code></a></li>
+<li><a href="./docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md"><code>docs/benchmarks/20260415-qwen2.5-32b-host-local-trace-backed-loading-evidence.md</code></a></li>
+<li><a href="./docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md"><code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code></a></li>
+<li><a href="./docs/architecture/api/materialization-flow.md"><code>docs/architecture/api/materialization-flow.md</code></a></li>
+<li><a href="./docs/architecture/api/region-backed.md"><code>docs/architecture/api/region-backed.md</code></a></li>
+<li><a href="./docs/internals/byte-range-mapping-and-execution.md"><code>docs/internals/byte-range-mapping-and-execution.md</code></a></li>
+<li><a href="./docs/internals/model-loading.md"><code>docs/internals/model-loading.md</code></a></li>
+<li><a href="./core/store/runtime/ingestion/materialization_facade.cc"><code>core/store/runtime/ingestion/materialization_facade.cc</code></a></li>
+<li><a href="./core/store/runtime/ingestion/materialization_service.cc"><code>core/store/runtime/ingestion/materialization_service.cc</code></a></li>
+<li><a href="./daemon/service/controllers/materialization_target_plan_utils.cc"><code>daemon/service/controllers/materialization_target_plan_utils.cc</code></a></li>
+<li><a href="./daemon/service/controllers/representation_transform_builder.cc"><code>daemon/service/controllers/representation_transform_builder.cc</code></a></li>
+<li><a href="./tools/trace_plan_to_load_plan.py"><code>tools/trace_plan_to_load_plan.py</code></a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

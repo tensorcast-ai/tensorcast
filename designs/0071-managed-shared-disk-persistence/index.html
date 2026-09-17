@@ -1,0 +1,2712 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0071-managed-shared-disk-persistence/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Managed Shared-Disk Persistence (Async) And Internal Disk Fallback - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Managed Shared-Disk Persistence (Async) And Internal Disk Fallback
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Implement <strong>real</strong> asynchronous persistence for <code>StorePolicy(profile="durable")</code> and any policy with <code>shared_disk = MUST|SHOULD</code>, by writing a <strong>managed disk directory</strong> under a daemon-managed storage root and registering that location in Global Store via a new durable entity: <code>artifact_disk_locations</code>.</p>
+<p>Retrieval uses disk fallback <strong>without</strong> user-supplied paths: callers only express whether disk is allowed/preferred; TensorCast resolves disk paths internally via <code>artifact_disk_locations</code> and only then supplies <code>hints.disk_path</code> to the engine.</p>
+<p>This design also:
+- Adds a Global Store–generated <strong>cluster_id</strong> namespace under <code>server.storage_path</code> to avoid cross-cluster collisions when multiple clusters share the same underlying filesystem.
+- Allows <strong>multi-part disk data files</strong> (<code>tensor.data_&lt;n&gt;</code>) and aligns the parts with persistence shards (byte-range shards), so disk persistence can scale with shard planning.
+- Removes <code>key_mappings.disk_path</code> entirely (one disk-location mechanism only).
+- Keeps <code>from_disk</code> as an explicit <strong>import / registration</strong> API (it must not inject fallback disk paths into the normal materialization path).
+- Adds an explicit <code>wait_for_shared_disk_ms</code> retrieval knob so callers can block until managed shared-disk is ready (without delaying key publication).
+- Adds shared-disk hygiene: <code>deregister_artifact</code> purges managed shared-disk bytes by default (tombstone + delete).</p>
+<p>This design intentionally does <strong>not</strong> preserve compatibility with the current explicit-disk-path surfaces (e.g., <code>FallbackOptions.for_disk(...)</code>). Those are removed.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>Today:
+- <code>daemon/state/persistence_manager.cc</code> treats shared-disk persistence as a <strong>simulated state machine</strong> (e.g., “COPY→COMPLETE on the next tick to simulate async disk writes”) and does not write artifact bytes to disk.
+- Disk fallback in the “get/materialize” path is driven by <strong>explicit disk paths</strong>:
+  - SDK <code>Store.from_disk(...)</code> / <code>Store.artifact(disk_path=...)</code> inject <code>FallbackOptions.for_disk(disk_path)</code> (<code>tensorcast/api/store/__init__.py</code>).
+  - Daemon key-based materialization consumes <code>mapping.disk_path</code> from Global Store key mappings (<code>daemon/service/controllers/materialization_controller.cc</code>).
+- <code>key_mappings.disk_path</code> creates a second disk-location mechanism that is hard to reason about and bypasses durability semantics.
+- Treating shared disk as a Global Store "replica" is semantically wrong in the current system:
+  - Worker cleanup marks all replicas for inactive workers unavailable (<code>tensorcast/global_store/services/worker_service.py</code>), which would incorrectly hide shared-disk bytes.
+  - Transport selection includes <code>memory_type=DISK</code> replicas (<code>tensorcast/global_store/repositories/replica_repository.py</code>), which would accidentally route P2P decisions through DISK entries.
+  - Replica registration validation requires a worker id, routable address, and node_port (<code>tensorcast/global_store/services/artifact_service.py</code>), which does not match shared-disk semantics.
+- Multi-part disk directories exist but are unsafe today for large part counts:
+  - Partition ordering is lexicographic in <code>DiskLoader</code> and in <code>compute_data_multihash_from_disk_dir</code>, which misorders <code>tensor.data_10</code> before <code>tensor.data_2</code> and can silently corrupt loads/hashes.</p>
+<p>We need:
+- A <strong>real disk persistence pipeline</strong> that produces on-disk artifacts readable by the existing disk loader.
+- A <strong>Global Store–backed discovery mechanism</strong> so daemons can automatically locate managed disk directories, without using replica semantics.
+- A <strong>cluster namespace</strong> inside <code>storage_path</code> for safety and observability.
+- A safe way to handle “published but not yet persisted to shared disk”: an explicit wait option that does not require delaying publication.
+- A single, explicit disk-location mechanism (<code>artifact_disk_locations</code>) and removal of key-mapping disk paths.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Real asynchronous persistence when policy includes <code>shared_disk</code> (especially <code>MUST</code>).</li>
+<li>Disk fallback without user-provided disk paths:</li>
+<li>callers only choose whether disk is allowed/preferred</li>
+<li>daemons find disk paths via Global Store</li>
+<li>Storage root hygiene:</li>
+<li>require <code>server.storage_path</code> to enable persistence-to-disk</li>
+<li>write all persisted artifacts under <code>server.storage_path</code></li>
+<li>add a cluster namespace folder under <code>server.storage_path</code></li>
+<li>Shared-disk hygiene:</li>
+<li>on <code>deregister_artifact</code>, purge managed shared-disk bytes by default to avoid unbounded growth</li>
+<li>do not hard-delete DB rows; mark disk locations as deleted (tombstones)</li>
+<li>Operator-friendly naming:</li>
+<li>when <code>key</code> is present, create a human-friendly path containing the key and persistence timestamp</li>
+<li>avoid collisions deterministically</li>
+<li>Persist disk locations in Global Store (<code>artifact_disk_locations</code>) so any daemon can discover them.</li>
+<li>Atomicity and crash safety: readers must never see partial replicas.</li>
+<li>Multi-part support: allow <code>tensor.data_&lt;n&gt;</code> and align parts with shard planning.</li>
+<li>Optional wait for shared-disk readiness during retrieval, without changing publish timing.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Compatibility shims for removed explicit-disk-path APIs.</li>
+<li>A full “remote stable” data-plane replication pipeline (control-plane work may remain best-effort and is separate).</li>
+<li>Making persistence synchronous with <code>put()</code> / <code>register()</code>; persistence remains async and observable via task state.</li>
+<li>Supporting Windows/macOS (Linux-only project assumption).</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="terminology">Terminology<a class="headerlink" href="#terminology" title="Permanent link">&para;</a></h2>
+<ul>
+<li><strong>Storage root</strong>: <code>server.storage_path</code> (daemon config). Assumed shared across daemons for shared-disk persistence.</li>
+<li><strong>Cluster namespace</strong>: <code>&lt;storage_path&gt;/clusters/&lt;cluster_id&gt;/...</code> where <code>cluster_id</code> is minted by Global Store.</li>
+<li><strong>Managed disk directory</strong>: an on-disk directory written by a daemon as part of persistence, under the cluster namespace.</li>
+<li><strong>Disk location</strong>: a Global Store record pointing to a managed disk directory (or an imported one).</li>
+<li><strong>Shard</strong>: a persistence byte-range unit (<code>artifact_placement_shards</code>); in this design, shard <code>i</code> maps to disk part <code>tensor.data_&lt;i&gt;</code>.</li>
+</ul>
+<h2 id="high-level-components">High-level components<a class="headerlink" href="#high-level-components" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart LR
+  U["User&lt;br&gt;tc.put(..., policy='durable')"] --&gt; SDK["SDK&lt;br&gt;StartPersistence"]
+  SDK --&gt; DM["Daemon&lt;br&gt;StartPersistence RPC"]
+  DM --&gt; PM["PersistenceManager&lt;br&gt;(task state machine)"]
+  PM --&gt; WR["DiskPersistenceWriter&lt;br&gt;(write bytes + metadata)"]
+  WR --&gt; FS["Shared FS&lt;br&gt;storage_path/clusters/{cluster_id}/..."]
+  WR --&gt; GS["Global Store&lt;br&gt;upsert artifact_disk_locations"]
+  U2["User&lt;br&gt;tc.artifact(key).tensor*"] --&gt; DM2["Daemon&lt;br&gt;MaterializeByKey"]
+  DM2 --&gt; GS2["Global Store&lt;br&gt;resolve key -&gt; artifact_id&lt;br&gt;and list artifact_disk_locations"]
+  DM2 --&gt; ENG["StoreEngine&lt;br&gt;materialize_replica AUTO"]
+  ENG --&gt; DL["DiskLoader&lt;br&gt;read disk directory"]</code></pre>
+<h2 id="disk-persistence-trigger-semantics">Disk persistence trigger semantics<a class="headerlink" href="#disk-persistence-trigger-semantics" title="Permanent link">&para;</a></h2>
+<p>Policy interpretation happens in the daemon:
+- <code>policy.profile="durable"</code> expands to:
+  - <code>shared_disk_requirement = MUST</code>
+  - <code>local_stable_dram_requirement = SHOULD</code>
+  - no remote stable requirement by default
+  - See <code>daemon/state/store_policy_resolver.cc</code> (<code>profile_defaults</code>).</p>
+<p>Trigger rule:
+- When <code>shared_disk_requirement != NONE</code>, persistence task <strong>must</strong> create shared-disk persistence targets and attempt to satisfy them asynchronously.</p>
+<p>Hard requirement:
+- If <code>shared_disk_requirement == MUST</code>, disk persistence requires <code>server.storage_path</code> to be configured and valid; otherwise the persistence task fails fast.</p>
+<h3 id="key-aware-persistence-for-friendly-naming">Key-aware persistence (for friendly naming)<a class="headerlink" href="#key-aware-persistence-for-friendly-naming" title="Permanent link">&para;</a></h3>
+<p>To satisfy the “use key name + persistence time prefix” requirement, the persistence pipeline needs access to the key that the caller used for <code>put/register</code>.</p>
+<p>Today <code>StartPersistenceRequest</code> only carries <code>artifact_id</code> and <code>policy</code>. This design adds an optional <code>key_hint</code> to <code>StartPersistenceRequest</code>:
+- best-effort hint used for directory naming (best-effort <code>by_key</code> symlink only)
+- not required for correctness (disk location registration remains authoritative)
+- ignored if empty</p>
+<p>Note: <code>key_hint</code> must not be stored into key mappings (we delete <code>key_mappings.disk_path</code>). It is used only for an operator-friendly <code>by_key</code> symlink tree under the managed storage root.</p>
+<h2 id="on-disk-directory-format-must-match-existing-loader">On-disk directory format (must match existing loader)<a class="headerlink" href="#on-disk-directory-format-must-match-existing-loader" title="Permanent link">&para;</a></h2>
+<p>We persist a managed disk directory compatible with <code>core/store/materialization/dataplane/loaders/disk_loader.cc</code>:
+- <code>tensor.data_&lt;part_idx&gt;</code> (multi-part; we standardize on <code>tensor.data_0</code> even for single-part)
+- <code>tensor_index.json</code> (canonical index JSON, schema v3)
+- <code>artifact_descriptor.json</code> (RFC-0007; contains <code>artifact_id</code>, <code>index_multihash</code>, <code>data_multihash</code>, <code>schema_version</code>, <code>encoding</code>, <code>total_size</code>)
+- Optional: <code>verification.json</code> (recommended; used by verification pipeline when present)</p>
+<p>No new disk format is introduced.</p>
+<h3 id="multi-part-ordering-must-be-numeric-not-lexicographic">Multi-part ordering (MUST be numeric, not lexicographic)<a class="headerlink" href="#multi-part-ordering-must-be-numeric-not-lexicographic" title="Permanent link">&para;</a></h3>
+<p>Readers MUST order parts by numeric suffix (<code>tensor.data_0</code>, <code>tensor.data_1</code>, ..., <code>tensor.data_10</code>, ...).
+This requires a code fix: today <code>DiskLoader</code> and <code>compute_data_multihash_from_disk_dir</code> sort filenames lexicographically.
+The same numeric ordering is also required by later metadata-first mounted
+source contracts such as <code>0115</code>; public source snapshot evidence must not invent
+its own lexicographic partition ordering.</p>
+<p>Writer requirement:
+- Parts must be a contiguous sequence from <code>0..(part_count-1)</code> with no gaps.
+- Concatenating parts in numeric order yields the canonical byte stream (offset 0 at the start of part 0).</p>
+<h2 id="storage-root-layout-with-cluster-namespace">Storage root layout with cluster namespace<a class="headerlink" href="#storage-root-layout-with-cluster-namespace" title="Permanent link">&para;</a></h2>
+<p>We require <code>server.storage_path</code> to be set and treat it as a shared filesystem root.</p>
+<p>Within that root, the daemon writes under a <strong>cluster namespace</strong>:</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>&lt;storage_path&gt;/
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>  clusters/
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    &lt;cluster_id&gt;/                       # generated by Global Store; includes start time prefix
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>      objects/
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>        &lt;artifact_id_sanitized&gt;/        # canonical object directory (unique per artifact_id)
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>          tensor.data_0
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>          tensor.data_1                 # when sharded / multi-part
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>          tensor_index.json
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>          artifact_descriptor.json
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>          verification.json             # optional
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>      by_key/                           # optional, for operator friendliness
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        &lt;key_sanitized&gt;/
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>          &lt;persist_ts&gt;_&lt;short_artifact&gt;/ -&gt; ../../objects/&lt;artifact_id_sanitized&gt;/
+</span></code></pre></div>
+<h3 id="cluster-id">Cluster ID<a class="headerlink" href="#cluster-id" title="Permanent link">&para;</a></h3>
+<p>The cluster ID is generated and persisted by Global Store at cluster start. Format:</p>
+<ul>
+<li><code>&lt;persist_start_time_utc&gt;_&lt;random&gt;</code> (example: <code>20260203T102030Z_7f3a2c1e</code>)</li>
+</ul>
+<p>Properties:
+- unique per cluster lifecycle
+- stable for the lifetime of the cluster
+- human sortable by start time prefix</p>
+<h4 id="cluster-id-discovery-daemon">Cluster ID discovery (daemon)<a class="headerlink" href="#cluster-id-discovery-daemon" title="Permanent link">&para;</a></h4>
+<p>Daemons must fetch <code>cluster_id</code> from Global Store at startup and cache it for:
+- namespacing disk writes (<code>&lt;storage_path&gt;/clusters/&lt;cluster_id&gt;/...</code>)
+- filtering/prefering managed disk locations for reads</p>
+<p>Decision: add <code>cluster_id</code> to Global Store <code>GetServerInfoResponse</code> to avoid introducing a new RPC surface.</p>
+<p>Note: this is distinct from <code>HealthCheckResponse.cluster_token</code> (an operator-supplied or runtime-config token). <code>cluster_id</code> is a persisted identity minted by Global Store.</p>
+<h3 id="collision-avoidance">Collision avoidance<a class="headerlink" href="#collision-avoidance" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>objects/&lt;artifact_id_sanitized&gt;/</code> is inherently collision-free for a given <code>artifact_id</code>.</li>
+<li><code>by_key/&lt;key&gt;/&lt;persist_ts&gt;_&lt;short_artifact&gt;/</code> collisions are avoided by:</li>
+<li><code>persist_ts</code> in UTC with millisecond precision</li>
+<li><code>short_artifact</code> (e.g., first 12 chars of the artifact id digest portion)</li>
+<li>if still collides, append a 6–8 hex random suffix</li>
+</ul>
+<p>The <code>by_key</code> entry is a symlink to the <code>objects</code> directory to avoid duplicating large data files.</p>
+<h2 id="global-store-metadata-model">Global Store metadata model<a class="headerlink" href="#global-store-metadata-model" title="Permanent link">&para;</a></h2>
+<p>We make disk persistence discoverable by writing a single disk-location entity, independent of replicas:</p>
+<p>1) Disk location record (authoritative for disk fallback)
+- Upsert an <code>artifact_disk_locations</code> row for <code>artifact_id</code> with a <code>relative_path</code> pointing to the managed directory under the cluster namespace (prefer storing a <em>relative</em> path inside <code>&lt;storage_path&gt;/clusters/&lt;cluster_id&gt;/...</code>).
+- The record MUST NOT be tied to worker liveness (no heartbeats, no request counters, no routable address fields).</p>
+<p>2) Key mapping
+- <code>key_mappings</code> stores only <code>key -&gt; artifact_id</code> plus optional routing hints (replica_uuid / daemon_address) for non-disk paths.
+- <code>key_mappings.disk_path</code> is removed.</p>
+<h3 id="disk-location-tombstones-soft-delete-and-shared-disk-purge">Disk location tombstones (soft-delete) and shared-disk purge<a class="headerlink" href="#disk-location-tombstones-soft-delete-and-shared-disk-purge" title="Permanent link">&para;</a></h3>
+<p>To prevent managed shared-disk bloat in "publish many versions + GC old versions" workflows (e.g., <code>examples/weight_publisher.py</code>), disk locations support a tombstone state:
+- <code>artifact_disk_locations.is_deleted</code> and <code>artifact_disk_locations.deleted_at</code> mark a location as deleted.
+- Normal list/selection for fallback MUST exclude deleted locations by default.
+- Tombstoning is <strong>sticky</strong> (once deleted, it cannot be revived by a later upsert) to avoid races where a stale writer
+  "re-registers" a path after GC starts.</p>
+<p>Deletion trigger and behavior:
+- <code>DeregisterArtifact</code> (daemon RPC) performs managed shared-disk cleanup directly, so no new Global Store RPC method is needed.
+- By default, <code>DeregisterArtifact</code>:
+  - lists managed disk locations for the artifact (including deleted, for idempotency)
+  - tombstones the matching <code>artifact_disk_locations</code> rows (<code>is_deleted=true</code>)
+  - deletes the corresponding on-disk directories under <code>&lt;storage_path&gt;/clusters/&lt;cluster_id&gt;/objects/...</code> (best-effort)
+- Callers can opt out via <code>keep_shared_disk_copy=true</code> on <code>DeregisterArtifact</code>.</p>
+<p>The Global Store DB rows are not physically deleted; tombstones preserve auditability and make GC idempotent.</p>
+<h3 id="disk-path-resolution-for-reads">Disk path resolution for reads<a class="headerlink" href="#disk-path-resolution-for-reads" title="Permanent link">&para;</a></h3>
+<p>Daemons resolve disk paths internally:
+- For key-based materialization:
+  - resolve <code>key -&gt; artifact_id</code>
+  - if disk is allowed, list <code>artifact_disk_locations</code> for the resolved <code>artifact_id</code> and pick a winner
+- For artifact-id materialization:
+  - list <code>artifact_disk_locations</code> for <code>artifact_id</code> when disk is allowed</p>
+<p>This removes the need for user-specified disk paths.</p>
+<h3 id="disk-path-selection-when-multiple-candidates-exist">Disk path selection (when multiple candidates exist)<a class="headerlink" href="#disk-path-selection-when-multiple-candidates-exist" title="Permanent link">&para;</a></h3>
+<p>In a correctly configured cluster, managed persistence yields exactly one canonical object directory per <code>artifact_id</code> under the cluster namespace. However, multiple records can exist transiently (retries, concurrent writers, imports).</p>
+<p>Selection rules:
+- Prefer a location whose <code>relative_path</code> is under <code>clusters/&lt;cluster_id&gt;/objects/</code> (managed namespace).
+- If multiple match, pick the lexicographically smallest <code>relative_path</code> (deterministic).
+- If none match, pick any valid location path (best-effort; surfaces degraded signal).</p>
+<p>The daemon must still normalize and enforce that the resulting path resolves under <code>server.storage_path</code>.</p>
+<h2 id="sdk-api-surface-changes-breaking">SDK API surface changes (breaking)<a class="headerlink" href="#sdk-api-surface-changes-breaking" title="Permanent link">&para;</a></h2>
+<p>We remove explicit disk-path fallbacks from the public SDK.</p>
+<h3 id="remove">Remove<a class="headerlink" href="#remove" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>FallbackOptions.disk_path</code></li>
+<li><code>FallbackOptions.for_disk(...)</code></li>
+<li><code>FallbackOptions.parse("disk:/path")</code> shortcuts</li>
+<li>Any public <code>disk_path=</code> parameters in <code>tc.artifact(...)</code> (disk path is never a retrieval ref)</li>
+</ul>
+<h3 id="keep-and-clarify">Keep (and clarify)<a class="headerlink" href="#keep-and-clarify" title="Permanent link">&para;</a></h3>
+<ul>
+<li><code>from_disk(path, ...)</code> remains, but becomes an <strong>import / registration</strong> operation:</li>
+<li>It resolves an artifact id (and canonical index) from a disk directory and registers it under normal identities (artifact_id and optional key mapping).</li>
+<li>It must not inject fallback disk paths into later materializations.</li>
+<li>Its on-wire request still includes a disk path because it is an explicit import API (<code>ResolveArtifactFromDiskRequest</code>).</li>
+</ul>
+<h4 id="from_disk-and-disk-locations">from_disk and disk locations<a class="headerlink" href="#from_disk-and-disk-locations" title="Permanent link">&para;</a></h4>
+<p>Decision: <code>from_disk</code> does <strong>not</strong> upsert <code>artifact_disk_locations</code> (and we do not support registering from_disk paths as disk locations for now).</p>
+<p>Rationale:
+- Avoid "disk location injection" from arbitrary user-supplied paths.
+- Keep managed persistence as the only producer of shared-disk locations used for fallback.</p>
+<h3 id="keep-conceptual">Keep (conceptual)<a class="headerlink" href="#keep-conceptual" title="Permanent link">&para;</a></h3>
+<p>Users still express <em>policy intent</em> via fallback preference:
+- allow/disallow disk
+- prefer disk vs prefer p2p vs local-only</p>
+<p>Concrete proposal:
+- <code>FallbackOptions.prefer</code>: <code>"auto" | "local" | "p2p" | "disk"</code>
+- <code>FallbackOptions.allow_p2p</code>: bool
+- <code>FallbackOptions.allow_disk</code>: bool</p>
+<p>Disk paths are never supplied by the user; they are discovered via Global Store.</p>
+<h3 id="user-experience">User experience<a class="headerlink" href="#user-experience" title="Permanent link">&para;</a></h3>
+<p>Typical usage becomes:
+- “default”: allow P2P and disk, daemon chooses best source (<code>prefer="auto"</code>)
+- “local only”: do not use P2P or disk (<code>prefer="local"</code> or explicit <code>allow_disk=false, allow_p2p=false</code>)
+- “disk preferred”: allow disk and flip ordering (<code>prefer="disk"</code>)</p>
+<h3 id="explicit-wait-for-managed-shared-disk-readiness-new">Explicit wait for managed shared-disk readiness (new)<a class="headerlink" href="#explicit-wait-for-managed-shared-disk-readiness-new" title="Permanent link">&para;</a></h3>
+<p>We do not change publication semantics (keys/metadata can be visible before shared-disk persistence completes).
+Instead, retrieval supports an explicit wait budget:</p>
+<ul>
+<li>Add <code>GetArtifactOptions.wait_for_shared_disk_ms</code> (default <code>0</code> = disabled).</li>
+<li>When enabled, TensorCast attempts a normal materialize first (P2P/LIP/local-as-usual). Only if that fails, it waits
+  for a managed disk location and then retries from disk.</li>
+<li>Waiting is based on Global Store <code>artifact_disk_locations</code> (kind must be <code>DISK_LOCATION_KIND_MANAGED</code> for the local
+  <code>cluster_id</code>). Because the location is only upserted after <code>artifact_descriptor.json</code> is written, waiting on the
+  location implies the directory is committed.</li>
+<li>Once managed disk is ready, the follow-up attempt is disk-only. If disk loading fails, the request fails (no P2P
+  fallback after disk becomes ready).</li>
+</ul>
+<h2 id="daemon-rpcapi-considerations">Daemon RPC/API considerations<a class="headerlink" href="#daemon-rpcapi-considerations" title="Permanent link">&para;</a></h2>
+<p>Daemon materialization RPCs should not accept user-supplied disk paths for fallback in the public interface.</p>
+<p>Internally, the daemon may still have:
+- an administrative/testing-only path that loads from a local directory
+- but it must not be reachable from the general public SDK surface</p>
+<p><code>StartPersistenceRequest</code> is extended with:
+- <code>string key_hint</code> (optional)</p>
+<p>This avoids any need for <code>PersistenceManager</code> to “scan Global Store for keys” and keeps the naming/metadata path explicit and deterministic.</p>
+<h1 id="detailed-design">Detailed Design<a class="headerlink" href="#detailed-design" title="Permanent link">&para;</a></h1>
+<h2 id="persistence-task-lifecycle-shared-disk-leg-multi-part">Persistence task lifecycle (shared disk leg, multi-part)<a class="headerlink" href="#persistence-task-lifecycle-shared-disk-leg-multi-part" title="Permanent link">&para;</a></h2>
+<p>Replace the current shared-disk simulation in <code>PersistenceManager::advance_shard_locked</code> with:</p>
+<p>1) Ensure a persistence source exists
+   - Prefer daemon-owned stable DRAM replica
+   - Else fall back to an active LIP lease (optional extension; first milestone can require stable DRAM)</p>
+<p>2) Compute destination directory path
+   - <code>objects/&lt;artifact_id_sanitized&gt;/</code> as canonical path
+   - If key is known, create <code>by_key/&lt;key&gt;/&lt;timestamp&gt;_&lt;short_artifact&gt;/</code> symlink</p>
+<p>3) Write shard parts (shard-scoped)
+   - Persist <code>tensor.data_&lt;shard_idx&gt;</code> by streaming the shard's canonical byte range.
+   - Parts may be retried independently (per-shard progress and errors).
+   - Shard disk targets must remain non-terminal (e.g., <code>COPYING</code>) until the artifact directory is committed.</p>
+<p>4) Finalize directory (artifact-scoped, once)
+   - Persist <code>tensor_index.json</code> (canonical) and (optional) <code>verification.json</code>.
+   - Persist <code>artifact_descriptor.json</code> <strong>last</strong> and treat it as the commit marker.
+   - Validate that all expected part files exist (0..shard_count-1) and sizes match the placement plan.
+   - <code>fsync</code> files + directory as needed to bound crash windows.</p>
+<p>5) Publish metadata to Global Store (artifact-scoped, once)
+   - Upsert <code>artifact_disk_locations</code> with the managed relative path
+   - Mark shared-disk persistence COMPLETE only after metadata publication succeeds and the directory is committed</p>
+<h3 id="progress-reporting">Progress reporting<a class="headerlink" href="#progress-reporting" title="Permanent link">&para;</a></h3>
+<p>Task progress for disk targets should be byte-based:
+- <code>progress = bytes_written / shard.size_bytes</code> for that disk target</p>
+<p>This replaces the current tick-based “complete next tick” behavior.</p>
+<h3 id="disk-persistence-state-machine-artifact-scoped">Disk persistence state machine (artifact-scoped)<a class="headerlink" href="#disk-persistence-state-machine-artifact-scoped" title="Permanent link">&para;</a></h3>
+<pre class="mermaid"><code>stateDiagram-v2
+  [*] --&gt; Pending
+  Pending --&gt; Writing: validate storage_path&lt;br&gt;resolve source&lt;br&gt;compute dst path
+  Writing --&gt; Finalizing: write all parts&lt;br&gt;then write descriptor last
+  Finalizing --&gt; Registering: directory committed
+  Registering --&gt; Success: upsert artifact_disk_locations in GS
+  Writing --&gt; Failed: write error
+  Finalizing --&gt; Failed: finalize error
+  Registering --&gt; Failed: GS register error
+  Failed --&gt; [*]
+  Success --&gt; [*]</code></pre>
+<p>Notes:
+- For <code>shared_disk=MUST</code>, any <code>Failed</code> transition fails the shard/task.
+- For <code>shared_disk=SHOULD</code>, <code>Failed</code> yields a degraded shard/task (policy-dependent).</p>
+<h2 id="writing-bytes-reuse-existing-streamingpump-infrastructure">Writing bytes: reuse existing streaming/pump infrastructure<a class="headerlink" href="#writing-bytes-reuse-existing-streamingpump-infrastructure" title="Permanent link">&para;</a></h2>
+<p>Recommended implementation strategy:
+- Use existing loader contracts and pumping infrastructure to stream bytes:
+  - Source: <code>loader::CpuMemorySource</code> over UMA CPU base ptr (preferred)
+  - Sink: a new <code>loader::FilePartitionSink</code> (PositionedSink) writing to <code>tensor.data_&lt;shard_idx&gt;</code> via <code>pwrite</code>
+  - Pump: <code>loader::pump_ranges(...)</code> using the daemon’s pinned buffer pool/executor model</p>
+<p>This allows bounded memory usage, good throughput, and consistent telemetry patterns with existing materialization.</p>
+<p>Concurrency constraint:
+- The daemon <code>BackgroundScheduler</code> runs tasks sequentially on a single thread (<code>daemon/state/background_scheduler.h</code>).
+  Disk IO must not block that thread for long durations; persistence should schedule heavy IO onto an appropriate
+  blocking executor and only orchestrate state transitions in the scheduler tick.</p>
+<h2 id="error-model">Error model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h2>
+<ul>
+<li><code>shared_disk = MUST</code></li>
+<li>disk write failure → shard FAILED → task FAILED</li>
+<li>metadata publication failure (disk location upsert) → shard FAILED → task FAILED</li>
+<li><code>shared_disk = SHOULD</code></li>
+<li>disk write failure → shard DEGRADED (or FAILED but task DEGRADED) based on existing policy semantics</li>
+</ul>
+<p>Errors must carry:
+- <code>last_error</code> with a stable, machine-searchable token (e.g., <code>shared_disk_write_failed</code>, <code>storage_path_missing</code>, <code>disk_location_upsert_failed</code>)
+- <code>degraded_reason</code> when applicable</p>
+<h2 id="security-and-path-validation">Security and path validation<a class="headerlink" href="#security-and-path-validation" title="Permanent link">&para;</a></h2>
+<ul>
+<li>All disk paths must be under <code>server.storage_path/clusters/&lt;cluster_id&gt;/...</code>.</li>
+<li>Key-derived path segments must be sanitized to prevent traversal and invalid characters.</li>
+<li>Daemon continues to normalize disk paths under <code>server.storage_path</code> (existing path utils).</li>
+</ul>
+<h2 id="retrieval-time-wait_for_shared_disk_ms-behavior-disk-readiness-gate">Retrieval-time wait_for_shared_disk_ms behavior (disk readiness gate)<a class="headerlink" href="#retrieval-time-wait_for_shared_disk_ms-behavior-disk-readiness-gate" title="Permanent link">&para;</a></h2>
+<p>When <code>wait_for_shared_disk_ms &gt; 0</code>, retrieval behaves as:</p>
+<p>1) Attempt normal materialization (P2P/LIP/local; disk may also be used if already discoverable).
+2) If the attempt fails, wait up to the requested budget for Global Store to report a managed disk location:
+   - list <code>artifact_disk_locations(artifact_id)</code>
+   - filter <code>cluster_id == local_cluster_id</code>
+   - require <code>kind == DISK_LOCATION_KIND_MANAGED</code>
+3) Once the managed location exists, resolve the on-disk path (enforcing storage_root normalization) and retry
+   materialization with <code>prefer=disk</code> and <code>allow_p2p=false</code>.
+4) If the disk retry fails, return the disk failure (do not fall back to P2P).</p>
+<p>Error model:
+- If managed disk does not become ready within the budget, fail with <code>DEADLINE_EXCEEDED</code>.
+- If Global Store is unavailable or the daemon cannot resolve <code>cluster_id</code>, waiting is not possible and the original
+  failure is returned (or <code>FAILED_PRECONDITION</code> when appropriate).</p>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>Global Store must persist:</p>
+<p>1) Cluster info (new table):
+- A durable (single-row) record for:
+  - <code>cluster_id</code> (string, includes start time prefix)
+  - <code>created_at</code> / <code>start_time_utc</code></p>
+<p>2) Disk locations (new table):
+- <code>artifact_disk_locations</code> with at least:
+  - <code>artifact_id</code>
+  - <code>cluster_id</code>
+  - <code>relative_path</code> (relative to <code>&lt;storage_path&gt;/</code>, or relative to <code>clusters/&lt;cluster_id&gt;/</code>)
+  - <code>kind</code> (v1: always <code>MANAGED</code>; reserve <code>IMPORTED</code> for a future explicit admin workflow)
+  - tombstone state:
+    - <code>is_deleted</code> (bool, default false)
+    - <code>deleted_at</code> (timestamp; set when tombstoned)
+  - timestamps</p>
+<p>3) Key mappings (schema cleanup):
+- Delete <code>key_mappings.disk_path</code> entirely.</p>
+<p>If the Global Store schema is centralized elsewhere (e.g., DuckDB schema management), the paired plan must include the required schema migration steps.</p>
+<h2 id="proposed-schema-sketch">Proposed schema (sketch)<a class="headerlink" href="#proposed-schema-sketch" title="Permanent link">&para;</a></h2>
+<div class="language-sql highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">cluster_info</span><span class="w"> </span><span class="p">(</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span><span class="n">singleton_id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="w"> </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">singleton_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">),</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="n">cluster_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">ZONE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">CURRENT_TIMESTAMP</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="p">);</span>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">artifact_disk_locations</span><span class="w"> </span><span class="p">(</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">    </span><span class="n">artifact_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="n">cluster_id</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="w">    </span><span class="n">relative_path</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="p">,</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a><span class="w">    </span><span class="n">kind</span><span class="w"> </span><span class="nb">TEXT</span><span class="w"> </span><span class="k">CHECK</span><span class="w"> </span><span class="p">(</span><span class="n">kind</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="p">(</span><span class="s1">'MANAGED'</span><span class="p">,</span><span class="s1">'IMPORTED'</span><span class="p">))</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="s1">'MANAGED'</span><span class="p">,</span>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="w">    </span><span class="n">is_deleted</span><span class="w"> </span><span class="nb">BOOLEAN</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">FALSE</span><span class="p">,</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">    </span><span class="n">deleted_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">ZONE</span><span class="p">,</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">ZONE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">CURRENT_TIMESTAMP</span><span class="p">,</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">    </span><span class="n">updated_at</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="w"> </span><span class="k">WITH</span><span class="w"> </span><span class="k">TIME</span><span class="w"> </span><span class="k">ZONE</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span><span class="w"> </span><span class="k">DEFAULT</span><span class="w"> </span><span class="k">CURRENT_TIMESTAMP</span><span class="p">,</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="w">    </span><span class="k">PRIMARY</span><span class="w"> </span><span class="k">KEY</span><span class="w"> </span><span class="p">(</span><span class="n">artifact_id</span><span class="p">,</span><span class="w"> </span><span class="n">cluster_id</span><span class="p">,</span><span class="w"> </span><span class="n">relative_path</span><span class="p">)</span>
+</span><span id="__span-1-17"><a id="__codelineno-1-17" name="__codelineno-1-17" href="#__codelineno-1-17"></a><span class="p">);</span>
+</span><span id="__span-1-18"><a id="__codelineno-1-18" name="__codelineno-1-18" href="#__codelineno-1-18"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_artifact_disk_locations_artifact</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">artifact_disk_locations</span><span class="p">(</span><span class="n">artifact_id</span><span class="p">);</span>
+</span><span id="__span-1-19"><a id="__codelineno-1-19" name="__codelineno-1-19" href="#__codelineno-1-19"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">INDEX</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">idx_artifact_disk_locations_cluster</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">artifact_disk_locations</span><span class="p">(</span><span class="n">cluster_id</span><span class="p">);</span>
+</span></code></pre></div>
+<p>Key mapping cleanup (conceptual):
+- remove <code>key_mappings.disk_path</code> from <code>schema.sql</code>, from key mapping protos, and from all code paths that read/write it.</p>
+<h1 id="invariants-must">Invariants (MUST)<a class="headerlink" href="#invariants-must" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Disk locations are <strong>durable</strong> and must not be tied to worker liveness (no worker_id, no heartbeats, no request counters).</li>
+<li>Disk locations must never be considered P2P transport candidates.</li>
+<li><code>artifact_disk_locations.relative_path</code> must be:</li>
+<li>relative (no absolute paths)</li>
+<li>traversal-safe (no <code>..</code>)</li>
+<li>rooted under the cluster namespace (expected prefix: <code>clusters/&lt;cluster_id&gt;/objects/&lt;artifact_id_sanitized&gt;/</code>)</li>
+<li>Deleted disk locations (<code>is_deleted=true</code>) MUST NOT be considered fallback candidates by default.</li>
+<li>Tombstones are sticky: once a disk location is marked deleted, later upserts must not un-delete it.</li>
+<li>Managed directories are committed only when <code>artifact_descriptor.json</code> exists; writers must write it last.</li>
+<li>Multi-part ordering is numeric by suffix; writers must emit contiguous part indices with no gaps.</li>
+<li><code>wait_for_shared_disk_ms</code> waits only for <code>DISK_LOCATION_KIND_MANAGED</code> in the local cluster, and disk is treated as
+  authoritative once it becomes ready (no P2P fallback after disk retry starts).</li>
+</ul>
+<h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
+<ul>
+<li>No new environment variables are introduced.</li>
+<li>Persistence-to-disk requires <code>server.storage_path</code> (already part of daemon config).</li>
+<li>Any new config knobs introduced during implementation (e.g., future throttles, concurrency limits) must follow the unified runtime config conventions in <code>docs/designs/0004-unified-runtime-config.md</code>.</li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<h2 id="c-snake_case-for-functions-pascalcase-for-classes">C++ (snake_case for functions, PascalCase for classes)<a class="headerlink" href="#c-snake_case-for-functions-pascalcase-for-classes" title="Permanent link">&para;</a></h2>
+<p>Proposed new/changed C++ identifiers:
+- Class: <code>DiskPersistenceWriter</code> (PascalCase)
+- Class: <code>FilePartitionSink</code> (PascalCase)
+- Function: <code>persist_shard_to_disk(...)</code> (snake_case)
+- Function: <code>finalize_disk_directory(...)</code> (snake_case)
+- Function: <code>resolve_cluster_id(...)</code> (snake_case)
+- Function: <code>upsert_artifact_disk_location(...)</code> (snake_case)
+- Function: <code>wait_for_managed_disk_location(...)</code> (snake_case)</p>
+<h2 id="python-snake_case-for-functions">Python (snake_case for functions)<a class="headerlink" href="#python-snake_case-for-functions" title="Permanent link">&para;</a></h2>
+<p>Proposed user-facing Python changes are mostly removals. If we introduce a replacement knob:
+- <code>FallbackOptions.allow_disk</code> (field name: snake_case)
+- <code>GetArtifactOptions.wait_for_shared_disk_ms</code> (field name: snake_case)</p>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Breaking API changes: removing explicit disk-path fallbacks requires updating callers.</li>
+<li>Shared filesystem assumption: disk fallback only works if all daemons can access the same <code>server.storage_path</code>.</li>
+<li>Consistency gaps: a disk directory can exist without GS metadata (or vice versa) during failures; must be handled with idempotent reconciliation and conservative read behavior.</li>
+<li>Performance: initial CPU stable → disk writes may be bandwidth-heavy; use streaming/pump to bound memory and avoid stalls.</li>
+<li>Multi-part correctness: reader ordering must be numeric to avoid silent corruption.</li>
+<li>Schema rollout risk: Global Store schema changes must be applied to existing DB files (avoid "schema.sql is updated but runtime DB lacks new tables").</li>
+<li>Wait-induced load: <code>wait_for_shared_disk_ms</code> can amplify Global Store traffic under load; use backoff + bounded wait,
+  and ensure the wait path is opt-in and observable.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Compatibility:
+- Not required. Explicit disk-path SDK surfaces are removed.</p>
+<p>Acceptance criteria:
+- When <code>policy</code> includes <code>shared_disk = MUST</code>, persistence creates a managed disk directory under <code>server.storage_path/clusters/&lt;cluster_id&gt;/...</code> and registers an <code>artifact_disk_locations</code> entry for it.
+- Any daemon, on <code>tc.artifact(key).tensor*</code> with disk allowed, can materialize from disk without user-provided disk paths.
+- <code>storage_path</code> missing produces a fast, clear failure for <code>shared_disk = MUST</code>.
+- Task status and progress reflect real write progress and errors.
+- When <code>wait_for_shared_disk_ms &gt; 0</code>, a retrieval that initially fails can succeed once managed shared-disk becomes ready
+  within the budget; if disk is ready but disk loading fails, the retrieval fails (no P2P fallback).
+- When <code>tc.deregister_artifact(...)</code> is called (default <code>keep_shared_disk_copy=false</code>), managed shared-disk bytes are
+  deleted and the corresponding <code>artifact_disk_locations</code> rows are tombstoned (soft-delete).</p>
+<h1 id="alternatives-and-rationale">Alternatives and Rationale<a class="headerlink" href="#alternatives-and-rationale" title="Permanent link">&para;</a></h1>
+<h2 id="why-not-store-disk-persistence-in-artifact-replicas">Why not store disk persistence in artifact replicas?<a class="headerlink" href="#why-not-store-disk-persistence-in-artifact-replicas" title="Permanent link">&para;</a></h2>
+<p>Replica records are fundamentally "worker-owned, routable, load-balanced" resources in the current Global Store design:
+- Worker cleanup and heartbeat freshness gates replica availability (<code>tensorcast/global_store/services/worker_service.py</code>).
+- Transport selection is based on <code>artifact_replicas</code> and includes <code>DISK</code> as a selectable memory_type today (<code>tensorcast/global_store/repositories/replica_repository.py</code>).
+- Replica validation requires worker identity and routable endpoints (<code>tensorcast/global_store/services/artifact_service.py</code>).</p>
+<p>Shared disk persistence is durable bytes on a filesystem and must not disappear when a worker dies; it must also never be considered a P2P transport candidate. Therefore it needs a separate durable entity: <code>artifact_disk_locations</code>.</p>
+<h2 id="why-remove-key_mappingsdisk_path">Why remove key_mappings.disk_path?<a class="headerlink" href="#why-remove-key_mappingsdisk_path" title="Permanent link">&para;</a></h2>
+<p>Two disk location channels (<code>key_mappings.disk_path</code> and "disk replicas") make correctness and operations unclear:
+- Key mappings are an indirection for <em>identity</em> (key -&gt; artifact_id), not a storage-location registry.
+- Disk fallback should be governed by durability state and authoritative locations, not by ad-hoc path hints.</p>
+<p><code>artifact_disk_locations</code> becomes the single disk location mechanism; key mappings stay minimal.</p>
+<h2 id="why-keep-from_disk-but-not-as-fallback-injection">Why keep from_disk (but not as fallback injection)?<a class="headerlink" href="#why-keep-from_disk-but-not-as-fallback-injection" title="Permanent link">&para;</a></h2>
+<p><code>from_disk</code> is valuable for importing an existing on-disk artifact directory into TensorCast, but it must not:
+- cause later, unrelated <code>tc.artifact(key)</code> operations to implicitly trust and use a user-supplied filesystem path, or
+- bypass the unified disk location mechanism.</p>
+<p>Keeping <code>from_disk</code> as an explicit import API retains utility while preserving a safe default for normal materialization flows.</p>
+<h1 id="decisions-confirmed">Decisions (Confirmed)<a class="headerlink" href="#decisions-confirmed" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>from_disk</code> default does not register disk locations; we do not support registering <code>from_disk</code> paths into <code>artifact_disk_locations</code> for now.</li>
+<li>Expose <code>cluster_id</code> by adding a field to Global Store <code>GetServerInfoResponse</code>.</li>
+<li>Commit semantics for managed directories uses <code>artifact_descriptor.json</code> as the commit marker (write it last).</li>
+<li>Do not delay key publication until shared-disk commit; add an explicit <code>wait_for_shared_disk_ms</code> for callers that want
+  to block until managed shared-disk is ready.</li>
+<li><code>wait_for_shared_disk_ms</code> waits only for <code>DISK_LOCATION_KIND_MANAGED</code>, starts only after a normal materialize attempt
+  fails, and fails the request if disk loading fails after readiness (no P2P fallback).</li>
+<li><code>DeregisterArtifact</code> performs managed shared-disk cleanup by default:</li>
+<li>tombstone <code>artifact_disk_locations</code> rows (<code>is_deleted=true</code>)</li>
+<li>delete on-disk directories under the managed namespace</li>
+<li>opt out via <code>keep_shared_disk_copy=true</code></li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Docs system spec: <code>docs/designs/0001-docs-system-design.md</code></li>
+<li>Policy model: <code>docs/architecture/api/policy-persistence.md</code></li>
+<li>Registration lifecycle: <code>docs/architecture/api/registration-flow.md</code></li>
+<li>Disk loader expectations: <code>core/store/materialization/dataplane/loaders/disk_loader.cc</code></li>
+<li>Disk dir hashing: <code>core/store/materialization/dataplane/metadata/disk_dir_hash.cc</code></li>
+<li>Current explicit disk path injection: <code>tensorcast/api/store/__init__.py</code></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

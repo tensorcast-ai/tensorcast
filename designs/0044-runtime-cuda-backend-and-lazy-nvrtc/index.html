@@ -1,0 +1,2689 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0044-runtime-cuda-backend-and-lazy-nvrtc/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Runtime CUDA Backend Selection and Lazy NVRTC Loading (Design) - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Runtime CUDA Backend Selection and Lazy NVRTC Loading (Design)
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#implementation-status-2026-01-02" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implementation Status (2026-01-02)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#runtime-dependency-model-linux" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Runtime dependency model (Linux)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#baseline-enforcement" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Baseline enforcement
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Replace TensorCast’s <strong>compile-time</strong> FakeCuda/RealCuda split (<code>USE_FAKE_CUDA</code> + Bazel <code>--define use_fake_cuda=true</code>) with a <strong>single binary</strong> that supports both backends, selected at <strong>runtime</strong>.</p>
+<p>Key changes:
+- <strong>Backends</strong>: <code>real</code> (default) and <code>fake</code> (test-only). <code>fake</code> is enabled only via an explicit environment variable and emits an unmistakable warning log.
+- <strong>No conditional compilation for fake/real</strong>: remove the <code>USE_FAKE_CUDA</code> macro branching in code; keep feature differences behind a runtime backend boundary.
+- <strong>Lazy NVRTC</strong>: refactor GPU hashing to load NVRTC and (driver) module APIs lazily at runtime, inspired by PyTorch’s <code>LazyNVRTC</code> pattern.</p>
+<p>This design assumes <strong>Linux-only</strong> and <strong>CUDA Toolkit 12.4+</strong> (<code>CUDA_VERSION &gt;= 12040</code>).</p>
+<p>Important: TensorCast will continue to <strong>always link and depend on</strong> the CUDA Runtime (<code>libcudart.so</code>). “CPU-only” in this design means <strong>no NVIDIA driver / no GPU / no NVRTC present</strong>, while still having the CUDA runtime available so the single binary can load and the fake backend can run.</p>
+<h2 id="implementation-status-2026-01-02">Implementation Status (2026-01-02)<a class="headerlink" href="#implementation-status-2026-01-02" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Runtime backend selection and dispatch live in <code>core/cuda/cuda_backend.cc</code>, with test-only gating and the error banner; fake/real are compiled together via <code>core/cuda/BUILD</code>.</li>
+<li>Driver entrypoints are centralized in <code>core/cuda/cuda_driver_api.{h,cc}</code> and NVRTC is lazy-loaded via <code>core/cuda/lazy_nvrtc.{h,cc}</code> + <code>core/cuda/dynamic_library.{h,cc}</code>.</li>
+<li>NVRTC GPU hashing now falls back to CPU hashing when unavailable in <code>core/common/artifact_hash_gpu.cc</code>.</li>
+<li>Call-site runtime behavior replaces <code>#ifdef USE_FAKE_CUDA</code> in <code>core/checkpoint/checkpoint.cc</code>, view executors, and <code>tensorcast/csrc/checkpoint_py.cc</code>.</li>
+<li>Backend selection tests are covered in <code>core/cuda/cuda_backend_selection_test.cc</code> (includes fake-mode driver-load guard).</li>
+<li>Validated on a CUDA-enabled host with <code>bazel test //core/... --verbose_failures --test_tag_filters="-stress,-rdma,-multi_gpu" --test_output=errors --test_summary=detailed</code> (all tests passed; Bazel noted size-filter warnings).</li>
+</ul>
+<h2 id="runtime-dependency-model-linux">Runtime dependency model (Linux)<a class="headerlink" href="#runtime-dependency-model-linux" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Always required (all backends): <code>libcudart.so</code></li>
+<li>Optional (real backend only; used via <code>DriverApi</code>): NVIDIA driver (<code>libcuda.so.1</code>)</li>
+<li>Optional (real backend only; used via <code>LazyNvrtc</code>): NVRTC (<code>libnvrtc.so.12</code> or <code>libnvrtc.so</code>)</li>
+</ul>
+<h2 id="baseline-enforcement">Baseline enforcement<a class="headerlink" href="#baseline-enforcement" title="Permanent link">&para;</a></h2>
+<p>We should enforce the toolkit baseline at compile time in the CUDA backend implementation layer:
+- <code>static_assert(CUDA_VERSION &gt;= 12040, "TensorCast requires CUDA Toolkit 12.4+");</code></p>
+<p>This keeps the codebase honest about the supported surface and avoids accidentally depending on older-toolkit behavior.</p>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The current approach makes FakeCuda an alternate <em>build</em> rather than an alternate <em>runtime mode</em>:
+- Header-level type splitting (<code>core/cuda/cuda_api.h:14</code>) creates ongoing maintenance burden and semantic drift.
+- Multiple call sites compile different behavior under <code>#ifdef USE_FAKE_CUDA</code> (e.g., <code>core/checkpoint/checkpoint.cc:462</code>, <code>core/store/materialization/dataplane/view/view_transform_executor.cc:56</code>), making it hard to reason about correctness and test coverage.
+- GPU hashing duplicates driver loading logic and hard-links NVRTC (<code>core/common/artifact_hash_gpu.cc:28</code>), making driverless / NVRTC-missing test environments brittle.</p>
+<p>We want FakeCuda to be a <strong>test-only runtime backend</strong> with a single build artifact and clear invariants.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ol>
+<li>Ship one C++ core + daemon build that can run with <code>real</code> or <code>fake</code> CUDA behavior.</li>
+<li>Default to <code>real</code> backend; <code>fake</code> must be explicitly requested and emits a very visible log.</li>
+<li>Enforce “fake is test-only” at runtime (fail fast if enabled outside a recognized test environment).</li>
+<li>Eliminate the type-level <code>#ifdef USE_FAKE_CUDA</code> split in <code>core/cuda/cuda_api.h</code> so fake/real share the same CUDA types.</li>
+<li>Make NVRTC an optional, lazily loaded capability so driverless / NVRTC-missing test environments can still load the binary and use the fake backend.</li>
+<li>Centralize CUDA driver symbol resolution so VMM, NVRTC module loading, and other driver features share one loader.</li>
+</ol>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Support CUDA versions older than 12.4.</li>
+<li>Support Windows or ROCm/HIP.</li>
+<li>Make <code>fake</code> suitable for production. <code>fake</code> exists only to enable hermetic tests and driverless (no NVIDIA driver) development validation.</li>
+<li>Preserve existing <code>USE_FAKE_CUDA</code> behavior as a long-term compatibility mode.</li>
+</ul>
+<h1 id="current-state">Current State<a class="headerlink" href="#current-state" title="Permanent link">&para;</a></h1>
+<p>TensorCast currently chooses fake/real CUDA at <strong>build time</strong>:</p>
+<ul>
+<li>Legacy build-time selection in <code>core/cuda/BUILD</code> used to select <code>cuda_fake.cc</code> vs <code>cuda_real.cc</code> and define <code>USE_FAKE_CUDA</code>; runtime dispatch now lives in <code>cuda_backend_fake.cc</code> + <code>cuda_backend_real.cc</code>.</li>
+<li><code>core/cuda/cuda_api.h:14</code> switches between real CUDA headers and a hand-rolled “minimal CUDA” type surface under <code>#ifndef USE_FAKE_CUDA</code>.</li>
+<li>Many codepaths are conditionally compiled:</li>
+<li>Checkpoint restore behavior: <code>core/checkpoint/checkpoint.cc:462</code>.</li>
+<li>View transform/ingest tensor device placement: <code>core/store/materialization/dataplane/view/view_transform_executor.cc:56</code>, <code>core/store/materialization/dataplane/view/view_ingest_executor.cc:58</code>.</li>
+<li>GPU hashing (NVRTC + driver module path) is compiled out under fake: <code>core/common/artifact_hash_gpu.cc:28</code>.</li>
+<li>CUDA error name/string helpers branch on <code>USE_FAKE_CUDA</code>: <code>core/cuda/error_handling.h:37</code>.</li>
+<li>Python extension exports build-time <code>is_fake_cuda()</code> and warns under <code>#ifdef USE_FAKE_CUDA</code>: <code>tensorcast/csrc/checkpoint_py.cc:919</code>.</li>
+</ul>
+<p>This approach forces two different builds to exist and creates drift between fake/real semantics.</p>
+<h2 id="build-graph-coupling-must-be-addressed">Build graph coupling (must be addressed)<a class="headerlink" href="#build-graph-coupling-must-be-addressed" title="Permanent link">&para;</a></h2>
+<p><code>use_fake_cuda</code> is not scoped to <code>core/common</code>; it appears in multiple Bazel packages:
+- <code>core/cuda/BUILD:5</code>
+- <code>core/checkpoint/BUILD:6</code>
+- <code>core/communicator/BUILD:7</code>
+- <code>core/store/BUILD:6</code>
+- <code>core/store/replica/BUILD:6</code>
+- <code>core/store/materialization/benchmarks/BUILD:5</code>
+- <code>core/store/materialization/dataplane/BUILD:369</code></p>
+<p>Some of these uses are <em>not</em> actually CUDA-backend selection (e.g., communicator IB verbs mocking in <code>core/communicator/BUILD</code> + <code>core/communicator/misc/ibv_wrap.h:11</code>). This design’s end state requires:
+- Eliminating <code>USE_FAKE_CUDA</code> as a cross-cutting macro.
+- Decoupling any non-CUDA test mocks from “CUDA backend selection.”</p>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="backend-boundary">Backend boundary<a class="headerlink" href="#backend-boundary" title="Permanent link">&para;</a></h2>
+<p>Introduce an internal backend interface and a single global selection point:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["Callers&lt;br&gt;core/store, daemon, sdk bindings"] --&gt; B["tensorcast::cuda API&lt;br&gt;(stable façade)"]
+  B --&gt; C{"Backend selected?"}
+  C --&gt;|no| D["SelectBackendOnce&lt;br&gt;(env + test gating)"]
+  C --&gt;|yes| E["Dispatch"]
+  D --&gt; E
+  E --&gt; F["RealCudaBackend&lt;br&gt;(cudart + driver entrypoints)"]
+  E --&gt; G["FakeCudaBackend&lt;br&gt;(CPU simulation)"]</code></pre>
+<ul>
+<li>The existing <code>tensorcast::cuda::*</code> functions remain as the primary call surface, but become forwarding wrappers to the selected backend.</li>
+<li>Backend selection is process-global and happens once (first use or explicit init).</li>
+<li><code>fake</code> backend must emit a loud log once per process (see “Logging” below).</li>
+</ul>
+<h3 id="proposed-runtime-selection-contract">Proposed runtime selection contract<a class="headerlink" href="#proposed-runtime-selection-contract" title="Permanent link">&para;</a></h3>
+<ul>
+<li>Environment variable: <code>TENSORCAST_CUDA_BACKEND</code></li>
+<li><code>fake</code>: select fake backend (test-only; see below).</li>
+<li><code>real</code> or unset: select real backend.</li>
+<li>Any other value: fail fast with <code>absl::InvalidArgumentError</code> (avoid silent misconfiguration).</li>
+<li>Default backend is always <code>real</code>.</li>
+<li><strong>Test-only enforcement</strong>: if <code>TENSORCAST_CUDA_BACKEND=fake</code> is set and the process does not look like a test (Bazel test or PyTest), initialization fails with <code>absl::FailedPreconditionError</code> (and logs a clear error).</li>
+</ul>
+<p>Recognized test environment heuristics (all runtime-only):
+- Bazel C++ tests: <code>TEST_SRCDIR</code> or <code>TEST_TMPDIR</code> is present.
+- PyTest: <code>PYTEST_CURRENT_TEST</code> is present.</p>
+<p>This is intentionally strict: enabling fake in production should be noisy and blocked.</p>
+<h3 id="logging">Logging<a class="headerlink" href="#logging" title="Permanent link">&para;</a></h3>
+<p>When fake is selected, log at startup/first selection with maximal visibility:
+- <code>LOG(ERROR)</code> with a banner (multiple lines) stating this is <strong>FAKE CUDA</strong> and <strong>TEST ONLY</strong>.
+- Include the selected backend, the reason (env var), and the test gating signals detected.</p>
+<p>Recommended banner format (must be stable and grep-friendly):</p>
+<div class="language-text highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>==================== TENSORCAST FAKE CUDA ENABLED ====================
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>This mode is TEST ONLY. GPU operations are simulated and may be incorrect
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>for performance, concurrency, and driver/IPC semantics.
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>TENSORCAST_CUDA_BACKEND=fake
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>Detected test env: &lt;yes|no&gt; (TEST_SRCDIR=&lt;set|unset&gt;, TEST_TMPDIR=&lt;set|unset&gt;, PYTEST_CURRENT_TEST=&lt;set|unset&gt;)
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>======================================================================
+</span></code></pre></div>
+<h2 id="backend-selection-algorithm-precise">Backend selection algorithm (precise)<a class="headerlink" href="#backend-selection-algorithm-precise" title="Permanent link">&para;</a></h2>
+<p>Selection occurs once per process via <code>std::call_once</code>:</p>
+<ol>
+<li>Read <code>TENSORCAST_CUDA_BACKEND</code>.</li>
+<li>If unset or <code>real</code>:</li>
+<li>Select <code>real</code>.</li>
+<li>If <code>fake</code>:</li>
+<li>Verify test environment heuristics (see above).</li>
+<li>If not a test environment: return <code>absl::FailedPreconditionError</code> with a remediation message.</li>
+<li>Select <code>fake</code> and emit the banner.</li>
+<li>Otherwise: return <code>absl::InvalidArgumentError</code>.</li>
+</ol>
+<p>The public <code>tensorcast::cuda::*</code> façade must not read environment variables directly; it delegates to a single selector helper.</p>
+<h2 id="public-facade-contract-unchanged-call-sites">Public façade contract (unchanged call sites)<a class="headerlink" href="#public-facade-contract-unchanged-call-sites" title="Permanent link">&para;</a></h2>
+<p>The design keeps the existing <code>tensorcast::cuda::*</code> API stable (<code>core/cuda/cuda_api.h</code>) but changes its implementation model:</p>
+<ul>
+<li>Today: backend implementations live in <code>cuda_backend_real.cc</code> and <code>cuda_backend_fake.cc</code>, dispatched at runtime.</li>
+<li>Target: one set of free functions that dispatch to either a <code>RealCudaBackend</code> or <code>FakeCudaBackend</code> instance.</li>
+</ul>
+<h3 id="explicitly-in-scope-operations">Explicitly in-scope operations<a class="headerlink" href="#explicitly-in-scope-operations" title="Permanent link">&para;</a></h3>
+<p>The backend boundary must cover all operations currently exposed in <code>core/cuda/cuda_api.h</code>, including:
+- Runtime API wrappers: device selection, malloc/free, host malloc/free, memcpy/memset sync+async, pointer attributes, streams, events, device sync, error query, peer access, CUDA IPC handles.
+- Driver API wrappers (VMM subset): <code>cu_mem_*</code> functions.</p>
+<p>Direct use of <code>&lt;cuda.h&gt;</code>, <code>&lt;cuda_runtime_api.h&gt;</code>, <code>&lt;nvrtc.h&gt;</code>, and driver <code>dlopen/dlsym</code> in non-backend code is out of scope after this change (see “Call site migrations”).</p>
+<h2 id="implementation-sketch-dispatch-without-odr-conflicts">Implementation sketch (dispatch without ODR conflicts)<a class="headerlink" href="#implementation-sketch-dispatch-without-odr-conflicts" title="Permanent link">&para;</a></h2>
+<p>The final build must compile both backend implementations into the same binary. This requires avoiding duplicate global free-function symbol definitions (ODR).</p>
+<p>Recommended approach:</p>
+<ul>
+<li>Keep <code>tensorcast::cuda::*</code> as the <strong>only</strong> exported symbol set.</li>
+<li>Implement backends as classes with identical method sets and dispatch through a single pointer:</li>
+<li><code>class RealCudaBackend final : public CudaBackend { ... }</code></li>
+<li><code>class FakeCudaBackend final : public CudaBackend { ... }</code></li>
+<li>Store the selected backend in a <code>NoDestructor</code> + <code>std::atomic&lt;CudaBackend*&gt;</code> or a <code>std::variant&lt;RealCudaBackend, FakeCudaBackend&gt;</code> behind <code>std::call_once</code>.</li>
+</ul>
+<p>Dispatch pattern:</p>
+<pre class="mermaid"><code>sequenceDiagram
+  participant Caller
+  participant Facade as tensorcast::cuda façade
+  participant Selector as SelectBackendOnce
+  participant Backend as CudaBackend
+
+  Caller-&gt;&gt;Facade: cuda::memcpy_async(...)
+  alt backend not selected yet
+    Facade-&gt;&gt;Selector: select_backend()
+    Selector-&gt;&gt;Backend: construct + publish pointer
+    Selector--&gt;&gt;Facade: ok
+  end
+  Facade-&gt;&gt;Backend: backend-&gt;memcpy_async(...)
+  Backend--&gt;&gt;Facade: absl::Status
+  Facade--&gt;&gt;Caller: absl::Status</code></pre>
+<p>Rationale:
+- Prevents link-time conflicts and keeps call sites unchanged.
+- Keeps fake/real differences behind an interface boundary (no <code>#ifdef</code> at call sites).</p>
+<h2 id="implementation-quality-bar-pytorch-style-elegance">Implementation quality bar (PyTorch-style elegance)<a class="headerlink" href="#implementation-quality-bar-pytorch-style-elegance" title="Permanent link">&para;</a></h2>
+<p>To meet “at least as elegant as PyTorch” expectations, the implementation should adopt these structural constraints:</p>
+<ol>
+<li><strong>X-macro symbol catalogs</strong> (avoid repetitive boilerplate and drift)</li>
+<li>Define the driver entrypoints list once as an X-macro and use it to:<ul>
+<li>declare members in a struct, and</li>
+<li>generate resolution code with uniform error handling.</li>
+</ul>
+</li>
+<li>Do the same for NVRTC entrypoints.</li>
+<li>
+<p>This mirrors PyTorch’s <code>C10_LIBCUDA_DRIVER_API_REQUIRED(_)</code> pattern (<code>/opt/pytorch/c10/cuda/driver_api.h</code>).</p>
+</li>
+<li>
+<p><strong>Single DynamicLibrary helper</strong> (no scattered <code>dlopen/dlsym</code>)</p>
+</li>
+<li>Provide a small <code>DynamicLibrary</code> wrapper in <code>core/cuda/</code> (Linux-only) and use it for:<ul>
+<li>NVRTC library loading (<code>libnvrtc.so.12</code>, then fallback to <code>libnvrtc.so</code>)</li>
+<li>any optional libraries in the future.</li>
+</ul>
+</li>
+<li>Keep <code>dlopen/dlsym</code> usage isolated to this helper.</li>
+<li>
+<p>This mirrors PyTorch’s <code>at::DynamicLibrary</code> usage in <code>LazyNVRTC</code>.</p>
+</li>
+<li>
+<p><strong>One-time initialization + cached function pointers</strong></p>
+</li>
+<li>
+<p>Both <code>DriverApi</code> and <code>LazyNvrtc</code> should:</p>
+<ul>
+<li>resolve function pointers once (thread-safe),</li>
+<li>store them in a struct, and</li>
+<li>never re-resolve on hot paths.</li>
+</ul>
+</li>
+<li>
+<p><strong>Uniform error conversion</strong></p>
+</li>
+<li>
+<p>Centralize driver error formatting (name + string) and NVRTC error formatting (<code>nvrtcGetErrorString</code>) so call sites don’t reimplement conversions.</p>
+</li>
+<li>
+<p><strong>Backend boundary is “deep”</strong></p>
+</li>
+<li>Only the backend (and its helpers) may touch CUDA runtime/driver/NVRTC APIs.</li>
+<li>Higher layers must remain backend-agnostic and use <code>tensorcast::cuda::*</code> only.</li>
+</ol>
+<h2 id="cuda-types-and-headers">CUDA types and headers<a class="headerlink" href="#cuda-types-and-headers" title="Permanent link">&para;</a></h2>
+<p>To avoid the “fake defines its own CUDA types” maintenance trap, <strong>always include</strong> CUDA headers for types:
+- <code>#include &lt;cuda.h&gt;</code>
+- <code>#include &lt;cuda_runtime_api.h&gt;</code></p>
+<p>The fake backend does not require a working driver/GPU; it only needs the type declarations available at compile time. The process still depends on <code>libcudart.so</code>, but runtime driver dependencies are addressed via lazy loading (NVRTC, driver module symbols), and the fake backend must not attempt to use driver-backed CUDA runtime/driver APIs.</p>
+<h2 id="fake-backend-semantics-what-must-be-simulated">Fake backend semantics (what must be simulated)<a class="headerlink" href="#fake-backend-semantics-what-must-be-simulated" title="Permanent link">&para;</a></h2>
+<p>FakeCuda is required to preserve <em>logical correctness expectations</em> of existing tests, not performance parity:
+- <code>cuda::get_device_count</code> must report a fixed positive count (current fake uses 4 GPUs).
+- Stream/event APIs must be asynchronous enough to exercise ordering logic (current fake uses a worker thread per stream).
+- IPC handle APIs:
+  - “String IPC” (<code>get_ipc_handle/open_ipc_handle</code>) is a same-process mapping in fake.
+  - “Native IPC mem handle” (<code>get_ipc_mem_handle/open_ipc_mem_handle</code>) is implemented via shm-backed mappings in fake.
+- VMM:
+  - Only the subset used by TensorCast is required; unsupported APIs must return <code>absl::UnimplementedError</code> (instead of compile-time <code>SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED</code>).</p>
+<p>The intent is to keep FakeCuda as a deterministic test harness, not a production fallback.</p>
+<h2 id="driver-api-loading-centralized">Driver API loading (centralized)<a class="headerlink" href="#driver-api-loading-centralized" title="Permanent link">&para;</a></h2>
+<p>Today, driver symbol loading is duplicated:
+- Legacy VMM loader in <code>core/cuda/cuda_real.cc</code> used <code>dlopen("libcuda.so") + dlsym</code> (now replaced by <code>DriverApi</code> in <code>core/cuda/cuda_backend_real.cc</code>).
+- GPU hashing in <code>core/common/artifact_hash_gpu.cc</code> implements its own driver loader (<code>core/common/artifact_hash_gpu.cc:45</code>).</p>
+<p>Replace both with a single <code>DriverApi</code> loader that:
+- Resolves required driver entrypoints once (thread-safe).
+- Provides typed function pointers for both VMM and module APIs.
+- Uses <code>cudaGetDriverEntryPoint(...)</code> (available since CUDA 12.4) as the primary resolution mechanism to avoid hard dependency on <code>dlopen</code> and to reduce driver/loader mismatch risks.
+  - If resolution fails, return <code>absl::UnavailableError</code> with actionable details.</p>
+<h3 id="resolution-mechanics-cuda-124-baseline">Resolution mechanics (CUDA 12.4 baseline)<a class="headerlink" href="#resolution-mechanics-cuda-124-baseline" title="Permanent link">&para;</a></h3>
+<p><code>cudaGetDriverEntryPoint</code> resolves a CUDA Driver API symbol name into a callable function pointer via the CUDA Runtime library. This avoids hardcoding <code>libcuda.so</code> names and reduces duplication of <code>dlopen/dlsym</code> logic.</p>
+<p>Requirements and edge cases:
+- On hosts without an NVIDIA driver (<code>libcuda.so.1</code> missing), <code>cudaGetDriverEntryPoint</code> calls must fail gracefully; callers should see <code>absl::UnavailableError("NVIDIA driver not available ...")</code>.
+- The resolution path must be used only in the <code>real</code> backend and only when the driver feature is needed.</p>
+<h3 id="required-driver-entrypoints-catalog-grounded-in-current-code">Required driver entrypoints catalog (grounded in current code)<a class="headerlink" href="#required-driver-entrypoints-catalog-grounded-in-current-code" title="Permanent link">&para;</a></h3>
+<p>The initial <code>DriverApi</code> must resolve the union of symbols currently used by:
+- <code>core/cuda/cuda_backend_real.cc</code> VMM wrappers (via <code>DriverApi</code>).
+- <code>core/common/artifact_hash_gpu.cc</code> NVRTC module load and launch (see <code>CudaDriverSymbols</code>).</p>
+<p>Required symbols (v1):
+- VMM: <code>cuInit</code>, <code>cuDeviceGet</code>, <code>cuDeviceGetAttribute</code>, <code>cuMemGetAllocationGranularity</code>, <code>cuMemAddressReserve</code>, <code>cuMemCreate</code>, <code>cuMemMap</code>, <code>cuMemSetAccess</code>, <code>cuMemUnmap</code>, <code>cuMemRelease</code>, <code>cuMemAddressFree</code>, <code>cuMemGetHandleForAddressRange</code>
+- Modules/kernels: <code>cuModuleLoadData</code>, <code>cuModuleGetFunction</code>, <code>cuLaunchKernel</code>, <code>cuModuleUnload</code>
+- Errors: <code>cuGetErrorName</code>, <code>cuGetErrorString</code></p>
+<p>Notes:
+- <code>cuInit</code> must be invoked (once) before using other driver entrypoints.
+- Errors must be surfaced as <code>absl::Status</code> with the driver-provided error name/string when available.</p>
+<h3 id="implementation-sketch-entrypoint-table">Implementation sketch (entrypoint table)<a class="headerlink" href="#implementation-sketch-entrypoint-table" title="Permanent link">&para;</a></h3>
+<p><code>DriverApi</code> should expose a single typed table of function pointers and a single initialization path:
+- <code>absl::Status DriverApi::ensure_loaded()</code>
+- <code>const DriverApi&amp; DriverApi::get()</code> (returns a singleton; <code>ensure_loaded()</code> must have succeeded)</p>
+<p>Load sequence (real backend only):
+1. Resolve <code>cuGetErrorName</code>/<code>cuGetErrorString</code> first (best-effort) so later failures can be formatted.
+2. Resolve all required symbols for the features TensorCast uses.
+3. Call <code>cuInit(0)</code> once.</p>
+<p>If any required symbol cannot be resolved:
+- Return <code>absl::UnavailableError("missing CUDA driver entrypoint: &lt;name&gt;")</code> with the underlying CUDA runtime error string if available.</p>
+<h2 id="lazy-nvrtc-loading-inspired-by-pytorch">Lazy NVRTC loading (inspired by PyTorch)<a class="headerlink" href="#lazy-nvrtc-loading-inspired-by-pytorch" title="Permanent link">&para;</a></h2>
+<p>GPU hashing needs NVRTC to compile an internal kernel. NVRTC should be optional:
+- In real backend, attempt to load NVRTC lazily when GPU hashing is requested.
+- If NVRTC is missing or compilation fails, fall back to CPU hashing (consistent with <code>docs/designs/0007-content-addressed-artifact-id.md</code>).
+- In fake backend, GPU hashing is never used; CPU hashing is the only path.</p>
+<p>Adopt key ideas from PyTorch <code>aten/src/ATen/cuda/detail/LazyNVRTC.cpp</code>:
+- Compute the NVRTC soname suffix from <code>CUDA_VERSION</code>:
+  - For CUDA 12.x, use <code>libnvrtc.so.&lt;major&gt;</code> (e.g., <code>libnvrtc.so.12</code>).
+- Use a lazy symbol-resolving stub pattern:
+  - On first call to an NVRTC function, resolve the symbol and cache the function pointer for subsequent calls.
+- Keep the loader isolated so the main binary can load on hosts without NVRTC present.</p>
+<h3 id="nvrtc-library-name-strategy-linux-cuda-12x">NVRTC library name strategy (Linux, CUDA 12.x)<a class="headerlink" href="#nvrtc-library-name-strategy-linux-cuda-12x" title="Permanent link">&para;</a></h3>
+<p>For CUDA 12.4+ on Linux, the primary expected soname is:
+- <code>libnvrtc.so.12</code></p>
+<p>Recommended fallback attempts (in order):
+- <code>libnvrtc.so.12</code> (preferred; stable across 12.x)
+- <code>libnvrtc.so</code> (last resort; supports non-standard packaging)</p>
+<h3 id="required-nvrtc-entrypoints-catalog-grounded-in-current-code">Required NVRTC entrypoints catalog (grounded in current code)<a class="headerlink" href="#required-nvrtc-entrypoints-catalog-grounded-in-current-code" title="Permanent link">&para;</a></h3>
+<p>The initial <code>LazyNvrtc</code> loader must cover the functions used today in GPU hashing:
+- <code>nvrtcVersion</code>, <code>nvrtcCreateProgram</code>, <code>nvrtcCompileProgram</code>, <code>nvrtcGetPTXSize</code>, <code>nvrtcGetPTX</code>,
+  <code>nvrtcGetProgramLogSize</code>, <code>nvrtcGetProgramLog</code>, <code>nvrtcDestroyProgram</code>, <code>nvrtcGetErrorString</code></p>
+<h3 id="implementation-sketch-pytorch-style-stub-caching">Implementation sketch (PyTorch-style stub caching)<a class="headerlink" href="#implementation-sketch-pytorch-style-stub-caching" title="Permanent link">&para;</a></h3>
+<p>The loader should:
+- Load the NVRTC shared library once (via <code>dlopen</code> or an internal dynamic library helper).
+- Resolve individual symbols lazily (<code>dlsym</code>) the first time each function is called.
+- Cache the resolved pointer for subsequent calls.</p>
+<p>This mirrors the key property of PyTorch’s approach: <strong>headers/types are available at compile time, but the NVRTC shared library is optional at runtime</strong>.</p>
+<p>Recommended structure:
+- <code>struct NvrtcApi { decltype(&amp;nvrtcCreateProgram) nvrtcCreateProgram = nullptr; ... }</code>
+- <code>NvrtcApi&amp; nvrtc_api()</code> returns a singleton.
+- Each wrapper:
+  1. Ensures the NVRTC library handle is opened.
+  2. Resolves the symbol into <code>NvrtcApi</code> if missing.
+  3. Calls through the function pointer.</p>
+<p>Failure model:
+- If the library cannot be opened or a symbol is missing, return <code>absl::UnavailableError</code> (not fatal) and let the caller fall back to CPU hashing.</p>
+<p>Preserve existing “driver vs NVRTC mismatch” diagnostics:
+- <code>core/common/artifact_hash_gpu.cc</code> currently detects <code>CUDA_ERROR_UNSUPPORTED_PTX_VERSION</code> and logs a hint including the NVRTC and driver versions (<code>core/common/artifact_hash_gpu.cc:61</code>).
+- After refactoring to lazy NVRTC, keep equivalent diagnostics when NVRTC compilation or module load fails so users can self-diagnose mismatched toolkit/driver installs.</p>
+<h2 id="call-site-migrations-remove-ifdef-use_fake_cuda-usage">Call site migrations (remove <code>#ifdef USE_FAKE_CUDA</code> usage)<a class="headerlink" href="#call-site-migrations-remove-ifdef-use_fake_cuda-usage" title="Permanent link">&para;</a></h2>
+<p>The end state requires no <code>#ifdef USE_FAKE_CUDA</code> selection logic in code. The following are the “must migrate” sites:</p>
+<ul>
+<li>Header-level type splitting:</li>
+<li><code>core/cuda/cuda_api.h:14</code></li>
+<li>Error name/string selection:</li>
+<li><code>core/cuda/error_handling.h:37</code></li>
+<li>Checkpoint restore behavior selection:</li>
+<li><code>core/checkpoint/checkpoint.cc:462</code></li>
+<li>View executor device selection:</li>
+<li><code>core/store/materialization/dataplane/view/view_transform_executor.cc:56</code></li>
+<li><code>core/store/materialization/dataplane/view/view_ingest_executor.cc:58</code></li>
+<li>GPU hashing conditional compilation:</li>
+<li><code>core/common/artifact_hash_gpu.cc:28</code></li>
+<li>Python extension build-time “is_fake_cuda” and warning:</li>
+<li><code>tensorcast/csrc/checkpoint_py.cc:919</code></li>
+</ul>
+<p>Migration rule:
+- Replace <code>#ifdef USE_FAKE_CUDA</code> behavior splits with runtime queries (<code>tensorcast::cuda::is_fake()</code>) and/or backend capability checks.</p>
+<h2 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h2>
+<p>New internal interfaces proposed by this design must follow repository naming rules:</p>
+<ul>
+<li>Classes/structs (PascalCase):</li>
+<li><code>CudaBackend</code></li>
+<li><code>RealCudaBackend</code></li>
+<li><code>FakeCudaBackend</code></li>
+<li><code>DriverApi</code></li>
+<li><code>LazyNvrtc</code></li>
+<li>Functions (snake_case):</li>
+<li><code>select_cuda_backend_from_env()</code></li>
+<li><code>is_test_environment()</code></li>
+<li><code>load_nvrtc_library()</code></li>
+<li><code>resolve_driver_entrypoints()</code></li>
+<li>Constants/macros (ALL_CAPS):</li>
+<li><code>TENSORCAST_CUDA_BACKEND_ENV</code></li>
+</ul>
+<h1 id="invariants-error-model">Invariants &amp; Error Model<a class="headerlink" href="#invariants-error-model" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Backend selection is process-global and happens once.</li>
+<li><code>fake</code> backend:</li>
+<li>Must not touch CUDA runtime/driver APIs (including “convenience” helpers such as error-name formatting).</li>
+<li>Must not invoke any <code>cudart</code> entrypoints that can transitively require an NVIDIA driver; all driver-backed <code>cuda*</code> usage must be confined to the real backend.</li>
+<li>Must provide deterministic semantics for the subset TensorCast uses (streams/events/IPC/memcpy), sufficient for unit/integration tests.</li>
+<li><code>real</code> backend:</li>
+<li>May return <code>absl::UnavailableError</code> for missing driver/GPU (e.g., <code>cudaGetDeviceCount</code> fails).</li>
+<li>May return <code>absl::UnimplementedError</code> when a requested capability is not available (e.g., NVRTC missing).</li>
+<li>NVRTC and driver module APIs are optional capabilities; failure must not crash the process unless the caller explicitly requires GPU hashing.</li>
+</ul>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li><strong>Stricter configuration behavior</strong>: invalid <code>TENSORCAST_CUDA_BACKEND</code> values fail fast (intentional), which may surprise users who previously relied on build-time defaults.</li>
+<li><strong>CUDA 13+ forward work</strong>: <code>cudaGetDriverEntryPoint</code> is deprecated in CUDA 13 (PyTorch notes this). Our baseline is CUDA 12.4, but if TensorCast later moves to CUDA 13, <code>DriverApi</code> should add a follow-up design to adopt the versioned entrypoint API.</li>
+<li><strong>Non-CUDA coupling</strong>: <code>USE_FAKE_CUDA</code> is currently reused for non-CUDA mocks (IBV). Removing it requires an explicit decoupling step (tracked in the plan).</li>
+<li><strong>NVRTC packaging variance</strong>: some environments may not ship <code>libnvrtc.so.12</code>; the lazy loader must produce actionable errors and reliably fall back to CPU hashing.</li>
+</ul>
+<h1 id="packaging-and-python-extension-considerations">Packaging and Python extension considerations<a class="headerlink" href="#packaging-and-python-extension-considerations" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>tensorcast/csrc/checkpoint_py.cc</code> currently exposes a build-time <code>is_fake_cuda()</code> and emits a Python warning under <code>#ifdef USE_FAKE_CUDA</code> (<code>tensorcast/csrc/checkpoint_py.cc:919</code>).</li>
+<li>After this change, <code>is_fake_cuda()</code> must become a <strong>runtime</strong> query that reflects <code>TENSORCAST_CUDA_BACKEND</code>, and the Python warning must become conditional on runtime backend selection (and preserve “very visible” semantics for fake).</li>
+<li><code>tensorcast/_build_config.py</code> currently guards against “extension built fake but torch has real CUDA”; this will need to pivot to “runtime fake selected while torch.cuda is available” and remain strict (test-only).</li>
+</ul>
+<h1 id="interaction-with-unified-runtime-config">Interaction with unified runtime config<a class="headerlink" href="#interaction-with-unified-runtime-config" title="Permanent link">&para;</a></h1>
+<p><code>docs/designs/0004-unified-runtime-config.md:18</code> states that environment variables should not influence runtime behavior in production. This design constrains <code>TENSORCAST_CUDA_BACKEND=fake</code> to test environments only (fail fast otherwise) to preserve that philosophy.</p>
+<p>If a future need arises to run “fake” outside tests (not planned), it must be introduced as an explicit config field in the unified config system and reviewed as a separate design.</p>
+<h1 id="alternatives-considered">Alternatives Considered<a class="headerlink" href="#alternatives-considered" title="Permanent link">&para;</a></h1>
+<ol>
+<li>Keep compile-time selection (<code>USE_FAKE_CUDA</code>) and add runtime flags inside each build.</li>
+<li>Rejected: still requires two builds and preserves type-level drift in <code>cuda_api.h</code>.</li>
+<li>Default to <code>auto</code> and silently fall back to fake when real fails.</li>
+<li>Rejected: fake is test-only and should never be a silent production fallback.</li>
+<li>Introduce a unified config field only (no env var).</li>
+<li>Rejected for this change: the requirement is explicit env-based forcing of fake. See “Compatibility” for how we keep this aligned with the unified config philosophy.</li>
+</ol>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Acceptance criteria:
+- No <code>#ifdef USE_FAKE_CUDA</code> branches remain in the C++ codebase for CUDA backend selection.
+- <code>TENSORCAST_CUDA_BACKEND=fake</code> selects fake backend <strong>only</strong> in tests; outside tests it fails fast with a clear message.
+- When fake is selected, an unmistakable <code>LOG(ERROR)</code> banner is emitted once.
+- <code>core/common/artifact_hash_gpu.cc</code> no longer hard-links NVRTC; NVRTC is loaded lazily and can fail over to CPU hashing.
+- All existing <code>tensorcast::cuda::*</code> call sites remain source-compatible.
+- CUDA Toolkit baseline is 12.4+; any missing driver entrypoints are treated as unsupported and reported clearly.</p>
+<p>Config philosophy compatibility:
+- <code>docs/designs/0004-unified-runtime-config.md</code> forbids environment variables for production behavior. This design treats <code>TENSORCAST_CUDA_BACKEND=fake</code> as a <strong>test-only escape hatch</strong>; production daemons/clients should not rely on it.</p>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li>TensorCast current CUDA abstraction and selection:</li>
+<li><code>core/cuda/BUILD</code> (current build-time select)</li>
+<li><code>core/cuda/cuda_api.h</code> (type-level <code>#ifdef USE_FAKE_CUDA</code>)</li>
+<li><code>core/cuda/cuda_backend_real.cc</code> / <code>core/cuda/cuda_backend_fake.cc</code></li>
+<li><code>core/common/artifact_hash_gpu.cc</code> (NVRTC + driver module loader)</li>
+<li>Unified config philosophy:</li>
+<li><code>docs/designs/0004-unified-runtime-config.md</code></li>
+<li>PyTorch Lazy NVRTC pattern (reference implementation):</li>
+<li><code>/opt/pytorch/aten/src/ATen/cuda/detail/LazyNVRTC.cpp</code></li>
+</ul>
+<h1 id="open-questions">Open Questions<a class="headerlink" href="#open-questions" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Should we allow <code>TENSORCAST_CUDA_BACKEND=fake</code> under <code>bazel run</code> for local dev, or keep the gate strictly to test runners only?</li>
+<li>Do we want to standardize a single dynamic-library helper (like PyTorch <code>at::DynamicLibrary</code>) in <code>core/cuda/</code> for reuse by NVRTC and other optional deps?</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

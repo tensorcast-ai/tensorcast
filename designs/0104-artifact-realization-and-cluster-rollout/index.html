@@ -1,0 +1,3243 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0104-artifact-realization-and-cluster-rollout/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Artifact Realization, Worker-Local Stable Readiness, and Cluster Rollout - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Artifact Realization, Worker-Local Stable Readiness, and Cluster Rollout
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p><code>0104</code> adopts a two-layer kernel for artifact rollout.</p>
+<p>Layer 1 is the worker-local realization kernel:</p>
+<ul>
+<li>it consumes <code>ArtifactSetRef</code>,</li>
+<li>it introduces <code>realize_set</code> as the explicit worker action that may claim
+  <code>local_stable_ready</code>,</li>
+<li>and it reuses the shared TensorCast dataplane and stable-tier machinery rather
+  than inventing a rollout-private copy path.</li>
+</ul>
+<p>Layer 2 is the cluster rollout orchestration kernel:</p>
+<ul>
+<li>it compiles worker realization plus optional child publication and hydration
+  stages into canonical <code>PlanSpec</code> fragments,</li>
+<li>it exposes rollout observation through <code>Operation[T]</code>,</li>
+<li>and it keeps rollout barriers, source closeout, and version-switch timing
+  outside <code>0056</code>, <code>0102</code>, and <code>0103</code> rather than redefining their contracts.</li>
+</ul>
+<p>Long-term repository rule:</p>
+<ul>
+<li><code>Artifact</code> and <code>ArtifactSetRef</code> remain the value and set-control units,</li>
+<li><code>realize_set</code> defines worker-local readiness,</li>
+<li><code>publish</code> keeps its <code>0103</code> meaning as one volatile target-publication family,</li>
+<li><code>hydrate</code> keeps its <code>0102</code> meaning as one instance-local realization family,</li>
+<li>and rollout is the orchestration layer that composes those scopes honestly.</li>
+</ul>
+<p>This design is explicitly depth-first rather than branch-first:</p>
+<ul>
+<li>it strengthens the existing programmable framework,</li>
+<li>it does not introduce a second execution substrate,</li>
+<li>it does not create a second set carrier beside <code>ArtifactSetRef</code>,</li>
+<li>and it does not create a second continuation family beside <code>Operation[T]</code>.</li>
+</ul>
+<p>First dependency-ready landing rule:</p>
+<ul>
+<li>Wave 1 closes only worker-local stable realization plus a worker-only
+  <code>workers_ready</code> barrier,</li>
+<li>multi-daemon rollout ownership, optional child instance stages, and issue-time
+  strategy sugar remain explicit follow-on scope,</li>
+<li>and <code>0104</code> must not claim whole-cluster closure before those prerequisites are
+  genuinely landed.</li>
+</ul>
+<h1 id="current-grounding-and-dependency-readiness">Current Grounding and Dependency Readiness<a class="headerlink" href="#current-grounding-and-dependency-readiness" title="Permanent link">&para;</a></h1>
+<p>The repository already has most of the substrate that <code>0104</code> needs, but not all
+of the closure.</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Current grounding</th>
+<th>Dependency readiness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ArtifactSetRef</code> and scalable worker-set warmup</td>
+<td><code>0056</code>, <code>prefetch_set</code>, daemon ingress</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>explicit worker readiness floor for <code>prefetch_set</code></td>
+<td><code>0056</code> says <code>local_replica_ready</code> only</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>canonical instance verbs</td>
+<td><code>manifest/publish/hydrate/evict_local</code> from <code>0102</code></td>
+<td>ready</td>
+</tr>
+<tr>
+<td>volatile target publication and <code>attach_existing -&gt; Operation[T]</code></td>
+<td><code>0103</code>, <code>0096</code>, <code>0100</code></td>
+<td>ready</td>
+</tr>
+<tr>
+<td>shared dataplane for source selection and transport</td>
+<td>materialize orchestrator, remote key source, export registry</td>
+<td>ready</td>
+</tr>
+<tr>
+<td>daemon-served <code>list_workers/list_instances/get_worker_capacity</code></td>
+<td>only partially landed today</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>reusable worker-local stable admission outside registration</td>
+<td>current code is registration-bound</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>inter-daemon control-plane subplan dispatch</td>
+<td>current peer-daemon helpers are data-plane-only</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td><code>ExecutePlan(public_continuation_required)</code></td>
+<td>reserved but not supported in daemon ingress</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>issue-time rollout strategy on <code>register/put</code></td>
+<td>not landed</td>
+<td>not ready</td>
+</tr>
+<tr>
+<td>cluster-durable rollout observation on top of generic <code>Operation[T]</code></td>
+<td>generic operation substrate exists; rollout owner does not</td>
+<td>not ready</td>
+</tr>
+</tbody>
+</table>
+<p>Repository rule:</p>
+<ul>
+<li><code>0104</code> may depend on the ready rows above,</li>
+<li>it must not assume the non-ready rows are already closed,</li>
+<li>and it must stage its first implementation around the ready worker-realization
+  slice before claiming full cluster-workflow closure.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<h2 id="1-prefetch_set-is-intentionally-narrow-but-rollout-needs-a-stronger-worker-contract">1. <code>prefetch_set</code> is intentionally narrow, but rollout needs a stronger worker contract<a class="headerlink" href="#1-prefetch_set-is-intentionally-narrow-but-rollout-needs-a-stronger-worker-contract" title="Permanent link">&para;</a></h2>
+<p><code>0056</code> correctly defines <code>prefetch_set</code> as scalable worker-set warmup over
+<code>ArtifactSetRef</code>.</p>
+<p>It also correctly constrains that action:</p>
+<ul>
+<li>worker scope only,</li>
+<li>readiness floor only,</li>
+<li>and no silent upgrade from <code>device="dram"</code> to <code>local_stable_ready</code>.</li>
+</ul>
+<p>That contract is sound, but it leaves a missing worker-level primitive for:</p>
+<ul>
+<li>weight rollout to inference workers,</li>
+<li>source issue followed by target steady-state retention,</li>
+<li>and any barrier that requires a real worker-local stable placement before
+  hydration or activation.</li>
+</ul>
+<p>The repository therefore needs an explicit worker-local realization action
+instead of overloading <code>prefetch_set</code>.</p>
+<h2 id="2-stable-admission-already-exists-but-it-is-still-registration-bound">2. Stable admission already exists, but it is still registration-bound<a class="headerlink" href="#2-stable-admission-already-exists-but-it-is-still-registration-bound" title="Permanent link">&para;</a></h2>
+<p>Current local stable semantics are real and valuable:</p>
+<ul>
+<li>registration resolves <code>StorePolicy</code>,</li>
+<li>the daemon may admit a local stable tier synchronously,</li>
+<li>and callers already receive <code>local_stable_tier</code> results.</li>
+</ul>
+<p>However, the implementation is still wired through registration metadata and
+registration commit flow.</p>
+<p>That is not yet the same abstraction as:</p>
+<ul>
+<li>materialize an already-issued artifact on a target worker,</li>
+<li>admit a target-local stable replica,</li>
+<li>and report worker-local steady-state readiness independently of source issue.</li>
+</ul>
+<p>The missing piece is a reusable stable-realization kernel that sits below both:</p>
+<ul>
+<li>registration-time local stable admission,</li>
+<li>and rollout-time worker realization.</li>
+</ul>
+<h2 id="3-rollout-target-identity-is-still-too-implicit">3. Rollout target identity is still too implicit<a class="headerlink" href="#3-rollout-target-identity-is-still-too-implicit" title="Permanent link">&para;</a></h2>
+<p><code>0055</code> and <code>0056</code> already treat stable target identity as config-derived and
+artifact-external:</p>
+<ul>
+<li>workers are identified by <code>daemon_id</code>,</li>
+<li>instances are identified by <code>instance_id</code>,</li>
+<li>and addresses are transport details rather than stable workflow identity.</li>
+</ul>
+<p>But the repository does not yet expose a fully consistent daemon-served target
+directory for rollout callers:</p>
+<ul>
+<li><code>WorkerDirectoryCache</code> exists internally for routed paths,</li>
+<li>SDK signals expose only <code>get_worker_status()</code> today,</li>
+<li>and instance directory caching is not yet mirrored on the daemon side.</li>
+</ul>
+<p>If rollout intent accepts bare strings without a canonical resolution path, the
+project will grow a second target-selection dialect.</p>
+<h2 id="4-persistence-remote-stable-and-rollout-readiness-are-not-the-same-contract">4. Persistence remote stable and rollout readiness are not the same contract<a class="headerlink" href="#4-persistence-remote-stable-and-rollout-readiness-are-not-the-same-contract" title="Permanent link">&para;</a></h2>
+<p>Current <code>StartPersistence</code> and remote stable tiers are durability-oriented:</p>
+<ul>
+<li>placement planning,</li>
+<li>lease planning,</li>
+<li>degraded-vs-required status,</li>
+<li>and remote presence or policy satisfaction.</li>
+</ul>
+<p>Rollout worker readiness asks a different question:</p>
+<ul>
+<li>did the target worker actually materialize a local DRAM replica,</li>
+<li>did that target finish local stable admission,</li>
+<li>and can that worker now act as a steady-state local source or hydration base.</li>
+</ul>
+<p>The repository must continue treating those as separate contracts even if they
+reuse some of the same machinery.</p>
+<h2 id="5-current-deployment-helpers-are-persistence-driven-rather-than-rollout-driven">5. Current deployment helpers are persistence-driven rather than rollout-driven<a class="headerlink" href="#5-current-deployment-helpers-are-persistence-driven-rather-than-rollout-driven" title="Permanent link">&para;</a></h2>
+<p><code>WeightPublisher</code> today still centers on:</p>
+<ul>
+<li>source-side <code>put/register</code>,</li>
+<li>optional persistence waiting,</li>
+<li>key mapping verification,</li>
+<li>external reload trigger,</li>
+<li>and GC.</li>
+</ul>
+<p>That is useful, but it does not make rollout semantics first-class:</p>
+<ul>
+<li>there is no explicit worker-local stable barrier,</li>
+<li>there is no rollout-owned source closeout contract,</li>
+<li>and persistence state is too close to being treated as rollout completion.</li>
+</ul>
+<p><code>0104</code> needs to define the generic rollout substrate first so deployment helpers
+become thin wrappers over canonical rollout contracts rather than the semantic
+owner of cross-worker replication.</p>
+<h2 id="6-the-repository-should-deepen-the-framework-not-fork-it">6. The repository should deepen the framework, not fork it<a class="headerlink" href="#6-the-repository-should-deepen-the-framework-not-fork-it" title="Permanent link">&para;</a></h2>
+<p>The core design pressure here is architectural, not only API-shaped.</p>
+<p>After <code>0055</code>, <code>0056</code>, <code>0102</code>, and <code>0103</code>, the right move is:</p>
+<ul>
+<li>deepen worker realization,</li>
+<li>deepen orchestration,</li>
+<li>and keep all execution paths on the same programmable spine.</li>
+</ul>
+<p>The wrong move would be:</p>
+<ul>
+<li>a rollout-private transport engine,</li>
+<li>a rollout-private attach family,</li>
+<li>a rollout-private target directory,</li>
+<li>or a "weights publish" control plane that bypasses <code>PlanSpec</code>.</li>
+</ul>
+<h1 id="ownership-boundary">Ownership Boundary<a class="headerlink" href="#ownership-boundary" title="Permanent link">&para;</a></h1>
+<h2 id="layer-split">Layer split<a class="headerlink" href="#layer-split" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Canonical object or contract</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>artifact value and selection truth</td>
+<td><code>Artifact</code>, <code>ArtifactSelection</code>, <code>SelectionIdentity</code></td>
+<td><code>0055</code>, <code>0078</code>, <code>0087</code></td>
+</tr>
+<tr>
+<td>set transport and runtime front door</td>
+<td><code>ArtifactSetRef</code>, <code>Runtime</code>, daemon ingress, signals</td>
+<td><code>0056</code></td>
+</tr>
+<tr>
+<td>source capability and backing truth</td>
+<td><code>ResolvedSourceCapability</code>, backing truth</td>
+<td><code>0093</code></td>
+</tr>
+<tr>
+<td>lifecycle capability and protection</td>
+<td>lifecycle kernel and capability families</td>
+<td><code>0094</code></td>
+</tr>
+<tr>
+<td>workflow gate and attach semantics</td>
+<td>workflow semantic plane</td>
+<td><code>0096</code></td>
+</tr>
+<tr>
+<td>public continuation contract</td>
+<td><code>Operation[T]</code>, <code>OperationRef</code>, continuation algebra</td>
+<td><code>0100</code></td>
+</tr>
+<tr>
+<td>instance-side artifact verbs</td>
+<td><code>manifest/publish/hydrate/evict_local</code></td>
+<td><code>0102</code></td>
+</tr>
+<tr>
+<td>volatile target publication subject</td>
+<td><code>PublicationSubjectKey</code>, <code>PublicationInstanceId</code>, <code>publish</code></td>
+<td><code>0103</code></td>
+</tr>
+<tr>
+<td>worker-local stable realization kernel</td>
+<td><code>realize_set</code>, worker readiness, path diagnostics</td>
+<td><code>0104</code></td>
+</tr>
+<tr>
+<td>cluster rollout orchestration kernel</td>
+<td>rollout intent, rollout barrier, source closeout, typed child-stage composition</td>
+<td><code>0104</code></td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>0104</code> consumes <code>ArtifactSetRef</code> directly and must not define a second
+   high-cardinality set carrier.</li>
+<li><code>0104</code> may add <code>RealizeSetAction</code> because <code>0056</code> explicitly reserved the
+   stronger worker-readiness seam, but it must not change the meaning of
+   <code>prefetch_set</code>.</li>
+<li><code>0104</code> must not redefine <code>publish</code>; optional publication is composed from
+   child <code>0103</code> actions.</li>
+<li><code>0104</code> must not redefine <code>hydrate</code>; optional hydration is composed from child
+   <code>0102</code> actions.</li>
+<li><code>0104</code> must reuse <code>Operation[T]</code> for public observation and must not create a
+   rollout-private continuation family.</li>
+<li><code>0104</code> must compile to the canonical <code>PlanSpec -&gt; daemon / NodeAgent /
+   EngineAdapter</code> execution spine rather than inventing a second execution
+   substrate.</li>
+<li><code>0104</code> must not require direct SDK connections to Global Store; rollout
+   target discovery and directory access remain daemon-served.</li>
+</ol>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define one explicit worker-local stable realization kernel over
+  <code>ArtifactSetRef</code>.</li>
+<li>Define one rollout orchestration kernel above that realization kernel rather
+  than flattening all replication into <code>publish</code>.</li>
+<li>Keep rollout target identity stable and config-derived:</li>
+<li>workers by <code>daemon_id</code></li>
+<li>instances by <code>instance_id</code></li>
+<li>Reuse the existing shared dataplane for source selection, transport,
+  materialization, and stable admission.</li>
+<li>Introduce additive daemon-served directory surfaces needed by rollout:</li>
+<li><code>list_workers</code></li>
+<li><code>list_instances</code></li>
+<li><code>get_worker_capacity</code></li>
+<li>Keep rollout observation on <code>Operation[T]</code>.</li>
+<li>Make <code>WeightPublisher</code> and similar helpers thin callers on top of the same
+  realization and rollout kernels.</li>
+<li>Expose a typed rollout barrier contract that later designs such as <code>0105</code> may
+  depend on.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine <code>prefetch_set</code> as silently stronger than <code>local_replica_ready</code>.</li>
+<li>Redefine <code>publish</code> to mean cross-worker replication.</li>
+<li>Redefine persistence remote stable success as rollout success.</li>
+<li>Introduce a second execution substrate beside <code>PlanSpec</code>.</li>
+<li>Introduce a rollout-private engine adapter verb such as <code>engine.rollout(...)</code>.</li>
+<li>Turn the reserved <code>cluster_action</code> slot into the v1 owner of rollout truth.</li>
+<li>Add a per-item rollout hot path or per-item rollout table to Global Store.</li>
+<li>Make <code>put(..., strategy=...)</code> dependency-ready before source semantics are
+  made honest for transient-source rollout.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-two-layer-kernel">1. Two-layer kernel<a class="headerlink" href="#1-two-layer-kernel" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+  A["Artifact or ArtifactSetRef"] --&gt; B["Layer 1&lt;br&gt;worker-local realization kernel"]
+  B --&gt; C["worker-local readiness&lt;br&gt;local_replica_ready or local_stable_ready"]
+  C --&gt; D["Layer 2&lt;br&gt;cluster rollout orchestration kernel"]
+  D --&gt; E["optional child publish&lt;br&gt;0103 owner"]
+  D --&gt; F["optional child hydrate&lt;br&gt;0102 owner"]
+  E --&gt; G["rollout barrier"]
+  F --&gt; G
+  G --&gt; H["source closeout / activation timing"]</code></pre>
+<p>Kernel split:</p>
+<ul>
+<li>Layer 1 owns worker-local placement and readiness.</li>
+<li>Layer 2 owns cluster barrier, optional child-stage composition, and source
+  closeout timing.</li>
+</ul>
+<p>Long-term rule:</p>
+<ul>
+<li>worker realization is not cluster truth,</li>
+<li>cluster rollout is not target-publication truth,</li>
+<li>and target publication is not artifact truth.</li>
+</ul>
+<h2 id="2-canonical-target-identity-and-resolution">2. Canonical target identity and resolution<a class="headerlink" href="#2-canonical-target-identity-and-resolution" title="Permanent link">&para;</a></h2>
+<h3 id="21-stable-target-ids">2.1 Stable target ids<a class="headerlink" href="#21-stable-target-ids" title="Permanent link">&para;</a></h3>
+<p>Recommended typed inputs:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkerRealizationIntent</span><span class="p">:</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">artifact_set_ref</span><span class="p">:</span> <span class="n">ArtifactSetRef</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">worker_daemon_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">desired_readiness</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>        <span class="s2">"local_replica_ready"</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>        <span class="s2">"local_stable_ready"</span><span class="p">,</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    <span class="p">]</span> <span class="o">=</span> <span class="s2">"local_stable_ready"</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>    <span class="n">placement</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"dram"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"dram"</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>    <span class="n">source_closeout</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>        <span class="s2">"keep_source"</span><span class="p">,</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>        <span class="s2">"drop_on_barrier"</span><span class="p">,</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="s2">"keep_until_ttl"</span><span class="p">,</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>        <span class="s2">"best_effort"</span><span class="p">,</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="p">]</span> <span class="o">=</span> <span class="s2">"drop_on_barrier"</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">source_closeout_ttl_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="k">class</span><span class="w"> </span><span class="nc">PublicationStageIntent</span><span class="p">:</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n">instance_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="n">engine_request_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="n">ttl_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
+</span><span id="__span-0-25"><a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a>
+</span><span id="__span-0-26"><a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-27"><a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a><span class="k">class</span><span class="w"> </span><span class="nc">HydrationStageIntent</span><span class="p">:</span>
+</span><span id="__span-0-28"><a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>    <span class="n">instance_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+</span><span id="__span-0-29"><a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a>    <span class="n">engine_request_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-0-30"><a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a>
+</span><span id="__span-0-31"><a id="__codelineno-0-31" name="__codelineno-0-31" href="#__codelineno-0-31"></a>
+</span><span id="__span-0-32"><a id="__codelineno-0-32" name="__codelineno-0-32" href="#__codelineno-0-32"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-0-33"><a id="__codelineno-0-33" name="__codelineno-0-33" href="#__codelineno-0-33"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactRolloutIntent</span><span class="p">:</span>
+</span><span id="__span-0-34"><a id="__codelineno-0-34" name="__codelineno-0-34" href="#__codelineno-0-34"></a>    <span class="n">worker_realization</span><span class="p">:</span> <span class="n">WorkerRealizationIntent</span>
+</span><span id="__span-0-35"><a id="__codelineno-0-35" name="__codelineno-0-35" href="#__codelineno-0-35"></a>    <span class="n">publication</span><span class="p">:</span> <span class="n">PublicationStageIntent</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-36"><a id="__codelineno-0-36" name="__codelineno-0-36" href="#__codelineno-0-36"></a>    <span class="n">hydration</span><span class="p">:</span> <span class="n">HydrationStageIntent</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-37"><a id="__codelineno-0-37" name="__codelineno-0-37" href="#__codelineno-0-37"></a>    <span class="n">barrier_kind</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-0-38"><a id="__codelineno-0-38" name="__codelineno-0-38" href="#__codelineno-0-38"></a>        <span class="s2">"workers_ready"</span><span class="p">,</span>
+</span><span id="__span-0-39"><a id="__codelineno-0-39" name="__codelineno-0-39" href="#__codelineno-0-39"></a>        <span class="s2">"targets_published"</span><span class="p">,</span>
+</span><span id="__span-0-40"><a id="__codelineno-0-40" name="__codelineno-0-40" href="#__codelineno-0-40"></a>        <span class="s2">"instances_hydrated"</span><span class="p">,</span>
+</span><span id="__span-0-41"><a id="__codelineno-0-41" name="__codelineno-0-41" href="#__codelineno-0-41"></a>    <span class="p">]</span> <span class="o">=</span> <span class="s2">"workers_ready"</span>
+</span><span id="__span-0-42"><a id="__codelineno-0-42" name="__codelineno-0-42" href="#__codelineno-0-42"></a>    <span class="n">allow_partial</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>worker targets are identified by <code>daemon_id</code>, not by address and not by a
+   caller-defined alias.</li>
+<li>instance targets are identified by <code>instance_id</code>, not by an ad hoc string.</li>
+<li>rollout inputs must not overload one string field to mean:</li>
+<li>stable target identity,</li>
+<li>transport address,</li>
+<li>and user-facing label.</li>
+<li>if <code>source_closeout="keep_until_ttl"</code>, <code>source_closeout_ttl_ms</code> is required.</li>
+<li><code>barrier_kind</code> names rollout-owned cluster progression, not worker-local
+   readiness.</li>
+</ol>
+<h3 id="22-directory-substrate">2.2 Directory substrate<a class="headerlink" href="#22-directory-substrate" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> depends on the daemon-served directory direction from <code>0056</code>.</p>
+<p>Required additions:</p>
+<ul>
+<li><code>DirectoryController</code> on the daemon front door,</li>
+<li><code>InstanceExecutionDirectoryCache</code> alongside existing <code>WorkerDirectoryCache</code>,</li>
+<li>and SDK directory or signal methods that resolve through the connected daemon:</li>
+<li><code>runtime.directory().list_workers(...)</code></li>
+<li><code>runtime.directory().list_instances(...)</code></li>
+<li><code>runtime.directory().resolve_instance_execution(...)</code></li>
+<li><code>runtime.signals().get_worker_capacity(...)</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>rollout callers query workers and instances through the connected daemon, not
+   by opening direct SDK connections to Global Store.</li>
+<li>daemon caches may be bounded-staleness, but they must expose freshness
+   evidence and fail closed when the budget is exceeded.</li>
+<li>rollout compilation may resolve addresses from those caches, but addresses are
+   transport details and must not become rollout identity.</li>
+<li><code>0104</code> must not define a second target directory surface beside the <code>0056</code>
+   runtime directory and signals model.</li>
+</ol>
+<h2 id="3-worker-local-stable-realization-kernel">3. Worker-local stable realization kernel<a class="headerlink" href="#3-worker-local-stable-realization-kernel" title="Permanent link">&para;</a></h2>
+<h3 id="31-public-contract">3.1 Public contract<a class="headerlink" href="#31-public-contract" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> adopts a distinct worker action:</p>
+<ul>
+<li><code>realize_set</code></li>
+</ul>
+<p>Preferred <code>plan.proto</code> shape:</p>
+<div class="language-proto highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="kd">enum</span><span class="w"> </span><span class="n">RealizationPlacement</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="na">REALIZATION_PLACEMENT_UNSPECIFIED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="na">REALIZATION_PLACEMENT_DRAM</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-1-4"><a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="p">}</span>
+</span><span id="__span-1-5"><a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>
+</span><span id="__span-1-6"><a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="kd">enum</span><span class="w"> </span><span class="n">RealizationReadinessKind</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-7"><a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="w">  </span><span class="na">REALIZATION_READINESS_KIND_UNSPECIFIED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span>
+</span><span id="__span-1-8"><a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">  </span><span class="na">REALIZATION_READINESS_KIND_LOCAL_REPLICA_READY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-1-9"><a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">  </span><span class="na">REALIZATION_READINESS_KIND_LOCAL_STABLE_READY</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-1-10"><a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a><span class="p">}</span>
+</span><span id="__span-1-11"><a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>
+</span><span id="__span-1-12"><a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a><span class="kd">message</span><span class="w"> </span><span class="nc">RealizeSetAction</span><span class="w"> </span><span class="p">{</span>
+</span><span id="__span-1-13"><a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a><span class="w">  </span><span class="n">ArtifactSetRef</span><span class="w"> </span><span class="na">artifact_set</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
+</span><span id="__span-1-14"><a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a><span class="w">  </span><span class="n">RealizationPlacement</span><span class="w"> </span><span class="na">placement</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span>
+</span><span id="__span-1-15"><a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a><span class="w">  </span><span class="n">RealizationReadinessKind</span><span class="w"> </span><span class="na">desired_readiness</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">3</span><span class="p">;</span>
+</span><span id="__span-1-16"><a id="__codelineno-1-16" name="__codelineno-1-16" href="#__codelineno-1-16"></a><span class="p">}</span>
+</span></code></pre></div>
+<p>Recommended SDK surface:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">WorkerStepBuilder</span><span class="p">:</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">realize_set</span><span class="p">(</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>        <span class="n">art_set</span><span class="p">:</span> <span class="n">ArtifactSetRef</span><span class="p">,</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>        <span class="n">placement</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"dram"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"dram"</span><span class="p">,</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>        <span class="n">readiness_kind</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>            <span class="s2">"local_replica_ready"</span><span class="p">,</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>            <span class="s2">"local_stable_ready"</span><span class="p">,</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>        <span class="p">]</span> <span class="o">=</span> <span class="s2">"local_stable_ready"</span><span class="p">,</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>        <span class="n">depends_on</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="n">PlanStepRef</span><span class="p">[</span><span class="n">Any</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PlanStepRef</span><span class="p">[</span><span class="n">ArtifactSetResult</span><span class="p">]:</span> <span class="o">...</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li><code>prefetch_set</code> remains the normative scalable warmup action from <code>0056</code>.</li>
+<li><code>realize_set</code> is the explicit stronger worker action when the caller needs a
+   stronger contract than warmup.</li>
+<li>in the first implementation wave, <code>placement="dram"</code> is the only
+   dependency-ready target placement for stable realization.</li>
+<li><code>realize_set(..., readiness_kind="local_stable_ready")</code> must not succeed if
+   the worker only reached <code>local_replica_ready</code>.</li>
+<li>the public action remains artifact-first and set-first; there is no
+   weight-specific alias in proto or framework core.</li>
+</ol>
+<h3 id="32-result-family">3.2 Result family<a class="headerlink" href="#32-result-family" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> should extend the existing batch result family rather than creating a
+second rollout-private result tree.</p>
+<p>Recommended additive shape:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactSetResult</span><span class="p">:</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">set_digest_hex</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-3-4"><a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>    <span class="n">outcomes</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ArtifactSetItemResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+</span><span id="__span-3-5"><a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>    <span class="n">observed_readiness_kind</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-6"><a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>    <span class="n">path_profile</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-3-7"><a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="n">degraded_reason</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li>partial per-item outcomes remain visible.</li>
+<li>readiness and path diagnostics are additive fields on the existing set-result
+   family.</li>
+<li>the step-level status must report degradation or failure honestly; it must
+   not silently downgrade success from <code>local_stable_ready</code> to
+   <code>local_replica_ready</code>.</li>
+</ol>
+<h3 id="33-internal-decomposition">3.3 Internal decomposition<a class="headerlink" href="#33-internal-decomposition" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> should not treat current registration-time stable admission as the final
+reuse point.</p>
+<p>Recommended internal split:</p>
+<ul>
+<li><code>ReplicaMaterializationService</code></li>
+<li>remains responsible for allocation, source selection, and data loading.</li>
+<li><code>StableRealizationService</code></li>
+<li>new reusable kernel responsible for:<ul>
+<li>materialize target-local DRAM replica</li>
+<li>request stable admission</li>
+<li>project readiness and path diagnostics</li>
+</ul>
+</li>
+<li><code>LocalStableTierService</code></li>
+<li>becomes a registration adapter over that reusable kernel rather than the
+    only owner of stable-realization logic.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>registration-time local stable admission and rollout-time worker realization
+   must converge on the same stable-realization kernel.</li>
+<li><code>LocalStableTierService</code> should remain the registration-facing adapter because
+   registration still has its own policy-resolution and commit semantics.</li>
+<li><code>0104</code> must not duplicate the materialization dataplane in a rollout-private
+   service.</li>
+</ol>
+<h3 id="34-path-selection-and-diagnostics">3.4 Path selection and diagnostics<a class="headerlink" href="#34-path-selection-and-diagnostics" title="Permanent link">&para;</a></h3>
+<p>Rollout path selection remains automatic and diagnostics-rich.</p>
+<p>Recommended diagnostic path profiles:</p>
+<ul>
+<li><code>cpu_memfd_local_ingress</code></li>
+<li><code>cpu_stream_local_ingress</code></li>
+<li><code>gpu_staging_local_ingress</code></li>
+<li><code>gpu_direct_rdma_pull_to_cpu_stable</code></li>
+<li><code>gpu_staged_rdma_pull_to_cpu_stable</code></li>
+<li><code>cpu_direct_write_pull_to_cpu_stable</code></li>
+<li><code>cpu_staged_pull_to_cpu_stable</code></li>
+<li><code>disk_fallback_pull</code></li>
+</ul>
+<p>Selection rule:</p>
+<ul>
+<li>stage 1 chooses source ingress into the issuer daemon,</li>
+<li>stage 2 chooses worker realization into target-local stable DRAM.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>these are diagnostics, not semantic identity.</li>
+<li>default callers should not choose direct-RDMA vs staged-RDMA manually.</li>
+<li>path selection must reuse:</li>
+<li><code>MaterializeOrchestrator</code></li>
+<li><code>RemoteKeySource</code></li>
+<li>export capability flags from <code>MemoryExportRegistry</code></li>
+<li>disk fallback may be used when source capability is unavailable and an honest
+   disk source exists, but that does not change rollout semantics.</li>
+</ol>
+<h3 id="35-relation-to-persistence">3.5 Relation to persistence<a class="headerlink" href="#35-relation-to-persistence" title="Permanent link">&para;</a></h3>
+<p>Persistence remains separate.</p>
+<p>Normative rules:</p>
+<ol>
+<li>current remote stable persistence success must not be interpreted as
+   <code>local_stable_ready</code> on a worker.</li>
+<li>rollout may reuse capacity signals, placement hints, and durability metadata
+   from persistence-oriented code, but not its semantic meaning.</li>
+<li>stable-realization failure and persistence degradation must remain separately
+   visible in results and telemetry.</li>
+</ol>
+<h2 id="4-cluster-rollout-orchestration-kernel">4. Cluster rollout orchestration kernel<a class="headerlink" href="#4-cluster-rollout-orchestration-kernel" title="Permanent link">&para;</a></h2>
+<h3 id="41-compiler-model">4.1 Compiler model<a class="headerlink" href="#41-compiler-model" title="Permanent link">&para;</a></h3>
+<p>Rollout is a compiler over canonical actions, not a second execution substrate.</p>
+<p>Recommended internal carrier:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">class</span><span class="w"> </span><span class="nc">RolloutBarrierRef</span><span class="p">:</span>
+</span><span id="__span-4-3"><a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">rollout_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-4"><a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>    <span class="n">barrier_kind</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-4-5"><a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>        <span class="s2">"workers_ready"</span><span class="p">,</span>
+</span><span id="__span-4-6"><a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>        <span class="s2">"targets_published"</span><span class="p">,</span>
+</span><span id="__span-4-7"><a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a>        <span class="s2">"instances_hydrated"</span><span class="p">,</span>
+</span><span id="__span-4-8"><a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a>    <span class="p">]</span>
+</span><span id="__span-4-9"><a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>    <span class="n">artifact_set_digest_hex</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-10"><a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a>    <span class="n">target_scope_digest_hex</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-11"><a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a>
+</span><span id="__span-4-12"><a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a>
+</span><span id="__span-4-13"><a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-14"><a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="k">class</span><span class="w"> </span><span class="nc">CompiledRollout</span><span class="p">:</span>
+</span><span id="__span-4-15"><a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a>    <span class="n">plan</span><span class="p">:</span> <span class="n">plan_pb2</span><span class="o">.</span><span class="n">PlanSpec</span>
+</span><span id="__span-4-16"><a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a>    <span class="n">barrier_ref</span><span class="p">:</span> <span class="n">RolloutBarrierRef</span>
+</span><span id="__span-4-17"><a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a>
+</span><span id="__span-4-18"><a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a>
+</span><span id="__span-4-19"><a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">slots</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-4-20"><a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a><span class="k">class</span><span class="w"> </span><span class="nc">ArtifactRolloutResult</span><span class="p">:</span>
+</span><span id="__span-4-21"><a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a>    <span class="n">rollout_id</span><span class="p">:</span> <span class="nb">str</span>
+</span><span id="__span-4-22"><a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a>    <span class="n">barrier_ref</span><span class="p">:</span> <span class="n">RolloutBarrierRef</span>
+</span><span id="__span-4-23"><a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a>    <span class="n">worker_realization</span><span class="p">:</span> <span class="n">ArtifactSetResult</span>
+</span><span id="__span-4-24"><a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a>    <span class="n">publication_steps</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">PlanStepResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span>
+</span><span id="__span-4-25"><a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a>    <span class="n">hydration_steps</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">PlanStepResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span>
+</span><span id="__span-4-26"><a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a>    <span class="n">satisfied_barrier_kind</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-4-27"><a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a>    <span class="n">degraded_reason</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span></code></pre></div>
+<p>Compiler phases:</p>
+<ol>
+<li>compile worker realization from <code>WorkerRealizationIntent</code></li>
+<li>compile optional child publication stages</li>
+<li>compile optional child hydration stages</li>
+<li>compute rollout barrier</li>
+<li>execute source closeout only after the selected barrier is satisfied</li>
+</ol>
+<p>Normative rules:</p>
+<ol>
+<li>worker realization, publication, and hydration remain separate scopes even if
+   one rollout orchestrator composes them.</li>
+<li>rollout truth lives at cluster scope, not at worker scope and not at one
+   publication subject scope.</li>
+<li>the compiler must lower to canonical <code>PlanSpec</code> fragments and child action
+   families rather than inventing a rollout-private byte-moving primitive.</li>
+</ol>
+<h3 id="42-dispatch-and-observation">4.2 Dispatch and observation<a class="headerlink" href="#42-dispatch-and-observation" title="Permanent link">&para;</a></h3>
+<p>Recommended public front door:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-5-1"><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Runtime</span><span class="p">:</span>
+</span><span id="__span-5-2"><a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">rollout</span><span class="p">(</span>
+</span><span id="__span-5-3"><a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>        <span class="bp">self</span><span class="p">,</span>
+</span><span id="__span-5-4"><a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>        <span class="n">intent</span><span class="p">:</span> <span class="n">ArtifactRolloutIntent</span><span class="p">,</span>
+</span><span id="__span-5-5"><a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-5-6"><a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>        <span class="n">ctx</span><span class="p">:</span> <span class="n">CallContext</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-5-7"><a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Operation</span><span class="p">[</span><span class="n">ArtifactRolloutResult</span><span class="p">]:</span> <span class="o">...</span>
+</span></code></pre></div>
+<p>Recommended daemon front door:</p>
+<ul>
+<li>add <code>RolloutController</code></li>
+<li>add <code>StartRollout</code> RPC returning a public-safe <code>OperationRef</code></li>
+<li>persist rollout progress through the generic operation plane already used for
+  long-tail cluster-durable work</li>
+</ul>
+<p>Implementation staging rule:</p>
+<ul>
+<li><code>Runtime.rollout(...)</code> and <code>StartRollout</code> remain the intended end-state front
+  door,</li>
+<li>but the first code landing does not need to ship them before worker-local
+  realization, directory closure from <code>0106</code>, and inter-daemon control-plane
+  dispatch substrate are real,</li>
+<li>otherwise <code>0104</code> would overclaim cluster rollout closure on top of missing
+  infrastructure.</li>
+</ul>
+<p>Critical rule:</p>
+<ul>
+<li>rollout observation must reuse <code>Operation[T]</code>; <code>0104</code> does not create a new
+  wait/status/cancel family.</li>
+</ul>
+<p>Important dependency split:</p>
+<ul>
+<li><code>0104</code> v1 should not depend on <code>ExecutePlan(public_continuation_required)</code> or
+  on new inter-daemon control-plane dispatch,</li>
+<li>because daemon ingress still supports <code>terminal_only</code> only and current
+  peer-daemon transport helpers are data-plane-only,</li>
+<li>and <code>0104</code> does not need either substrate to close the first worker-local
+  realization plus worker-only barrier wave.</li>
+</ul>
+<h3 id="43-optional-child-publication-and-hydration-stages">4.3 Optional child publication and hydration stages<a class="headerlink" href="#43-optional-child-publication-and-hydration-stages" title="Permanent link">&para;</a></h3>
+<p>Optional child stages remain owner-specific:</p>
+<ul>
+<li>publication is still one <code>0103</code> child subject per target domain,</li>
+<li>hydration is still one <code>0102</code> child instance realization per target instance.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>rollout to many workers is many child worker realizations, not one publish
+   subject.</li>
+<li>optional publication on many instances is many child publishes, not one
+   artifact-global publish workflow.</li>
+<li>optional hydration on many instances is many child hydrations, not one
+   implicit consequence of worker realization.</li>
+<li><code>0104</code> must not add <code>EngineAdapter.rollout(...)</code>; it composes existing
+   <code>manifest/publish/hydrate</code> delegates only.</li>
+</ol>
+<p>Dependency-ready scope:</p>
+<ul>
+<li>the worker-only rollout barrier (<code>workers_ready</code>) is the first dependency-ready
+  rollout slice,</li>
+<li>remote child publication and hydration through daemon ingress remain follow-on
+  work until local instance-target execution is supported on that front door.</li>
+</ul>
+<h3 id="44-source-closeout">4.4 Source closeout<a class="headerlink" href="#44-source-closeout" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> explicitly separates:</p>
+<ul>
+<li>source artifact truth,</li>
+<li>source backing,</li>
+<li>and target steady-state worker-local replicas.</li>
+</ul>
+<p>Recommended closeout modes:</p>
+<ul>
+<li><code>keep_source</code></li>
+<li><code>drop_on_barrier</code></li>
+<li><code>keep_until_ttl</code></li>
+<li><code>best_effort</code></li>
+</ul>
+<p>Default for transient training issuer flows:</p>
+<ul>
+<li><code>drop_on_barrier</code></li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>source closeout never mutates artifact truth or set identity.</li>
+<li>source closeout is gated by rollout barrier, not by persistence status alone.</li>
+<li><code>keep_until_ttl</code> requires an explicit TTL field and must not inherit an
+   implicit timeout from unrelated retention settings.</li>
+<li>source closeout may release transient source backing after the selected
+   barrier without implying that the source daemon still owns steady-state
+   replicas.</li>
+</ol>
+<h3 id="45-rollout-barrier-contract-and-0105">4.5 Rollout barrier contract and <code>0105</code><a class="headerlink" href="#45-rollout-barrier-contract-and-0105" title="Permanent link">&para;</a></h3>
+<p><code>0104</code> must expose a typed barrier contract, not just prose.</p>
+<p>Barrier contract:</p>
+<ul>
+<li><code>RolloutBarrierRef</code></li>
+<li><code>barrier_kind</code></li>
+<li><code>artifact_set_digest_hex</code></li>
+<li>target-scope digest</li>
+</ul>
+<p>Why this matters:</p>
+<ul>
+<li><code>0105</code> already reserves <code>rollout_gated_publish</code>,</li>
+<li>and that closeout kind needs a typed child barrier contract rather than an
+  untyped hidden dependency.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>rollout barrier identity is separate from publication-subject identity.</li>
+<li>rollout barrier identity is separate from closeout-contract digest.</li>
+<li>later designs may depend on <code>RolloutBarrierRef</code>, but they must not reconstruct
+   rollout truth from an untyped string or from operation metadata alone.</li>
+</ol>
+<h2 id="5-public-sdk-surface">5. Public SDK surface<a class="headerlink" href="#5-public-sdk-surface" title="Permanent link">&para;</a></h2>
+<h3 id="51-issue-time-strategy">5.1 Issue-time strategy<a class="headerlink" href="#51-issue-time-strategy" title="Permanent link">&para;</a></h3>
+<p>Long-term ergonomic surface:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-6-1"><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">RealizationStrategy</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+</span><span id="__span-6-2"><a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>    <span class="n">model_config</span> <span class="o">=</span> <span class="n">ConfigDict</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</span><span id="__span-6-3"><a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
+</span><span id="__span-6-4"><a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>    <span class="n">mode</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"local_only"</span><span class="p">,</span> <span class="s2">"worker_realization"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"local_only"</span>
+</span><span id="__span-6-5"><a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>    <span class="n">worker_daemon_ids</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span>
+</span><span id="__span-6-6"><a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>    <span class="n">placement</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"dram"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"dram"</span>
+</span><span id="__span-6-7"><a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>    <span class="n">desired_readiness</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-6-8"><a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>        <span class="s2">"local_replica_ready"</span><span class="p">,</span>
+</span><span id="__span-6-9"><a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>        <span class="s2">"local_stable_ready"</span><span class="p">,</span>
+</span><span id="__span-6-10"><a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a>    <span class="p">]</span> <span class="o">=</span> <span class="s2">"local_stable_ready"</span>
+</span><span id="__span-6-11"><a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a>    <span class="n">source_closeout</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span>
+</span><span id="__span-6-12"><a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a>        <span class="s2">"keep_source"</span><span class="p">,</span>
+</span><span id="__span-6-13"><a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a>        <span class="s2">"drop_on_barrier"</span><span class="p">,</span>
+</span><span id="__span-6-14"><a id="__codelineno-6-14" name="__codelineno-6-14" href="#__codelineno-6-14"></a>        <span class="s2">"keep_until_ttl"</span><span class="p">,</span>
+</span><span id="__span-6-15"><a id="__codelineno-6-15" name="__codelineno-6-15" href="#__codelineno-6-15"></a>        <span class="s2">"best_effort"</span><span class="p">,</span>
+</span><span id="__span-6-16"><a id="__codelineno-6-16" name="__codelineno-6-16" href="#__codelineno-6-16"></a>    <span class="p">]</span> <span class="o">=</span> <span class="s2">"drop_on_barrier"</span>
+</span><span id="__span-6-17"><a id="__codelineno-6-17" name="__codelineno-6-17" href="#__codelineno-6-17"></a>    <span class="n">source_closeout_ttl_ms</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-6-18"><a id="__codelineno-6-18" name="__codelineno-6-18" href="#__codelineno-6-18"></a>    <span class="n">wait_for</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">"issued"</span><span class="p">,</span> <span class="s2">"workers_ready"</span><span class="p">]</span> <span class="o">=</span> <span class="s2">"issued"</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li><code>strategy=</code> is convenience syntax over a typed field in
+   <code>RegisterArtifactOptions</code>.</li>
+<li><code>policy</code> remains backing and durability semantics.</li>
+<li><code>plan</code> remains local ingress and registration-plan semantics.</li>
+<li><code>strategy</code> is neither a replacement for <code>policy</code> nor a replacement for
+   explicit <code>Plan</code>.</li>
+<li><code>mode="worker_realization"</code> requires non-empty <code>worker_daemon_ids</code>.</li>
+<li><code>wait_for="workers_ready"</code> is only valid when worker realization is actually
+   requested.</li>
+<li><code>source_closeout="keep_until_ttl"</code> requires <code>source_closeout_ttl_ms</code>.</li>
+</ol>
+<p>Dependency-ready first wave:</p>
+<ul>
+<li><code>register(..., strategy=...)</code></li>
+</ul>
+<p>Declared but not dependency-ready first wave:</p>
+<ul>
+<li><code>put(..., strategy=...)</code></li>
+</ul>
+<p>Reason:</p>
+<ul>
+<li><code>register()</code> is already the more honest surface for transient or externally
+  backed source issuance,</li>
+<li>while <code>put()</code> still implies a local stable source commit path today.</li>
+</ul>
+<h3 id="52-issue-result-and-observation">5.2 Issue result and observation<a class="headerlink" href="#52-issue-result-and-observation" title="Permanent link">&para;</a></h3>
+<p>Recommended additive fields on <code>RegisteredArtifact</code>:</p>
+<ul>
+<li><code>realization_operation_ref: OperationRef | None</code></li>
+<li><code>realization_result: ArtifactSetResult | None</code></li>
+</ul>
+<p>Recommended helper:</p>
+<div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="n">op</span> <span class="o">=</span> <span class="n">artifact</span><span class="o">.</span><span class="n">realization_operation</span><span class="p">()</span>
+</span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">result</span> <span class="o">=</span> <span class="n">op</span><span class="o">.</span><span class="n">result</span><span class="p">(</span><span class="n">timeout_s</span><span class="o">=...</span><span class="p">)</span>
+</span></code></pre></div>
+<p>Normative rules:</p>
+<ol>
+<li><code>RegisteredArtifact</code> remains the single top-level issue result type.</li>
+<li>realization observation reuses <code>Operation[T]</code>.</li>
+<li>if issue-time strategy completes inline, <code>realization_result</code> may be
+   populated eagerly.</li>
+<li>if realization continues asynchronously, <code>realization_operation_ref</code> must be
+   sufficient to reattach through the generic operation plane.</li>
+</ol>
+<h2 id="6-delegate-and-controller-topology">6. Delegate and Controller Topology<a class="headerlink" href="#6-delegate-and-controller-topology" title="Permanent link">&para;</a></h2>
+<p><code>0104</code> does not need a new engine delegate family, but it does need a clearer
+control-plane split.</p>
+<p>Recommended additions and adjustments:</p>
+<ul>
+<li><code>DirectoryController</code></li>
+<li>daemon-served worker and instance directory plus worker-capacity snapshots</li>
+<li><code>InstanceDirectoryCache</code></li>
+<li>daemon-side companion to <code>WorkerDirectoryCache</code></li>
+<li><code>StableRealizationService</code></li>
+<li>reusable worker-local stable realization kernel</li>
+<li><code>LocalStableTierService</code></li>
+<li>narrowed into a registration adapter over <code>StableRealizationService</code></li>
+<li><code>RolloutController</code></li>
+<li>front door for <code>StartRollout</code> and rollout compilation / dispatch</li>
+</ul>
+<p>Recommended no-op by design:</p>
+<ul>
+<li>do not add <code>EngineAdapter.rollout(...)</code></li>
+<li>do not add a rollout-private transport controller</li>
+<li>do not add a rollout-private target-publication controller</li>
+</ul>
+<h2 id="7-proto-and-surface-implications">7. Proto and Surface Implications<a class="headerlink" href="#7-proto-and-surface-implications" title="Permanent link">&para;</a></h2>
+<h3 id="71-plan-and-nodeagent">7.1 Plan and NodeAgent<a class="headerlink" href="#71-plan-and-nodeagent" title="Permanent link">&para;</a></h3>
+<p>Required additive changes:</p>
+<ul>
+<li>add <code>RealizeSetAction</code> to <code>plan.proto</code></li>
+<li>add realization enums for placement and readiness kind</li>
+<li>extend <code>node_agent.v1.ArtifactSetResult</code> with:</li>
+<li><code>observed_readiness_kind</code></li>
+<li><code>path_profile</code></li>
+<li><code>degraded_reason</code></li>
+<li>add SDK <code>WorkerStepBuilder.realize_set(...)</code></li>
+<li>add local runner and daemon-ingress execution support for <code>realize_set</code></li>
+</ul>
+<h3 id="72-daemon-front-door">7.2 Daemon front door<a class="headerlink" href="#72-daemon-front-door" title="Permanent link">&para;</a></h3>
+<p>Required additive changes:</p>
+<ul>
+<li>add daemon-served directory RPCs:</li>
+<li><code>ListWorkers</code></li>
+<li><code>ListInstances</code></li>
+<li><code>GetWorkerCapacity</code></li>
+<li>add <code>StartRollout</code> RPC returning an <code>OperationRef</code></li>
+</ul>
+<p>Repository rule:</p>
+<ul>
+<li>generic operation wait/status/cancel stay on the existing operation plane;
+  <code>0104</code> should not add rollout-specific wait/status RPCs if generic
+  <code>Operation[T]</code> already covers them.</li>
+</ul>
+<h3 id="73-sdk-registration-and-runtime">7.3 SDK registration and runtime<a class="headerlink" href="#73-sdk-registration-and-runtime" title="Permanent link">&para;</a></h3>
+<p>Required additive changes:</p>
+<ul>
+<li>add <code>RegisterArtifactOptions.realization_strategy</code></li>
+<li>add top-level <code>register(..., strategy=...)</code></li>
+<li>add <code>RegisteredArtifact.realization_operation()</code></li>
+<li>add <code>Runtime.rollout(...)</code></li>
+</ul>
+<p>Follow-on changes:</p>
+<ul>
+<li><code>put(..., strategy=...)</code> once source semantics are made honest for that path</li>
+</ul>
+<h2 id="8-naming-compliance">8. Naming Compliance<a class="headerlink" href="#8-naming-compliance" title="Permanent link">&para;</a></h2>
+<p>The interfaces proposed here follow repository naming rules.</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>RealizeSetAction</code></td>
+<td>proto message</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>WorkerRealizationIntent</code></td>
+<td>Python dataclass / C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>ArtifactRolloutIntent</code></td>
+<td>Python dataclass / C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>RolloutBarrierRef</code></td>
+<td>Python dataclass / proto message</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>realize_set</code></td>
+<td>Python method / C++ helper</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>start_rollout</code></td>
+<td>RPC / helper name</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>REALIZATION_READINESS_KIND_LOCAL_STABLE_READY</code></td>
+<td>enum value</td>
+<td><code>ALL_CAPS</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>None are required for the first worker-realization wave if rollout observation
+reuses the generic operation plane.</p>
+<p>Repository rule:</p>
+<ul>
+<li><code>0104</code> must not introduce a per-item rollout table.</li>
+<li>If a later phase needs rollout-owned durable summary state beyond generic
+  operation snapshots, it may introduce a low-cardinality rollout summary record,
+  not a high-cardinality item truth store.</li>
+</ul>
+<h1 id="trade-offs-and-risks">Trade-offs and Risks<a class="headerlink" href="#trade-offs-and-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Adding <code>realize_set</code> increases worker action surface area, but that is cleaner
+  than silently overloading <code>prefetch_set</code>.</li>
+<li>Requiring daemon-served directory closure adds prerequisite work, but skipping
+  it would create a second target-resolution dialect.</li>
+<li>Making <code>register(..., strategy=...)</code> the first dependency-ready issue-time
+  surface is narrower than exposing both <code>put</code> and <code>register</code> at once, but it is
+  more honest about current source semantics.</li>
+<li>Deferring rollout use of <code>ExecutePlan(public_continuation_required)</code> reduces
+  short-term cleverness, but it keeps <code>0104</code> aligned with current readiness in
+  <code>0100</code>.</li>
+<li>If <code>RolloutController</code> starts executing bespoke transport logic instead of
+  compiling to canonical actions, the design will fork the framework rather than
+  deepen it.</li>
+</ul>
+<h1 id="compatibility-and-acceptance-criteria">Compatibility and Acceptance Criteria<a class="headerlink" href="#compatibility-and-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>ArtifactSetRef</code> remains the only framework-owned set carrier.</li>
+<li><code>prefetch_set</code> semantics remain unchanged and continue to mean
+  <code>local_replica_ready</code> only.</li>
+<li><code>realize_set(..., readiness_kind="local_stable_ready")</code> converges on actual
+  worker-local stable admission.</li>
+<li>worker targets are named by <code>daemon_id</code>; instance targets are named by
+  <code>instance_id</code>.</li>
+<li>rollout target discovery and capacity queries flow through daemon-served
+  directory and signals surfaces rather than direct SDK-to-GS calls.</li>
+<li>rollout compiles to canonical <code>PlanSpec</code> fragments and child action families
+  instead of a new execution substrate.</li>
+<li><code>publish</code> from <code>0103</code> remains optional child composition only.</li>
+<li>persistence remote stable semantics remain distinct from rollout readiness.</li>
+<li><code>register(..., strategy=...)</code> is the first dependency-ready issue-time
+  strategy surface; <code>put(..., strategy=...)</code> is not implied by that first wave.</li>
+<li><code>WeightPublisher</code>-style workflows can be expressed as issue plus worker
+  realization plus optional external reload without becoming the semantic owner
+  of cross-worker replication.</li>
+<li><code>0105</code> can depend on a typed rollout barrier child contract rather than an
+  untyped rollout string.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>0055</code> for artifact-first programmable primitives, stable target identity, and
+  <code>Operation[T]</code>.</li>
+<li><code>0056</code> for <code>ArtifactSetRef</code>, runtime / ingress / signals, and the explicit
+  <code>prefetch_set</code> readiness floor.</li>
+<li><code>0078</code> and <code>0087</code> for artifact value and selection semantics.</li>
+<li><code>0082</code> for CPU memfd local ingress optimization.</li>
+<li><code>0093</code> for source capability and backing truth.</li>
+<li><code>0094</code> for lifecycle capability families.</li>
+<li><code>0096</code> for workflow-semantic boundary and attach semantics.</li>
+<li><code>0100</code> for public continuation and routed-authority rules.</li>
+<li><code>0102</code> for canonical instance action vocabulary and manifest bridge.</li>
+<li><code>0103</code> for volatile publication-subject semantics.</li>
+<li><code>0105</code> for rollout-gated closeout that depends on a typed rollout barrier
+  contract.</li>
+<li><code>policy-persistence.md</code> for durability semantics that must remain distinct from
+  rollout readiness.</li>
+<li><code>p2p-transfer-strategies.md</code> for the shared dataplane reused by realization.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

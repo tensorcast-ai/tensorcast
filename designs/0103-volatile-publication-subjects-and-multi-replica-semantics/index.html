@@ -1,0 +1,3188 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0103-volatile-publication-subjects-and-multi-replica-semantics/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Volatile Target Publication Subjects and Multi-Replica Semantics - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Volatile Target Publication Subjects and Multi-Replica Semantics
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>TensorCast already supports a real target-backed volatile publication path:</p>
+<ul>
+<li>bytes are written into caller-owned target memory,</li>
+<li>binding current-value commit/promote paths mint
+  <code>binding_current_value_publication_token</code>,</li>
+<li>and <code>PublishTargetReplica</code> or <code>StartPublishTargetReplica</code> promotes that target into a routable replica.</li>
+</ul>
+<p>What is still missing is the stable object model underneath that landed path.</p>
+<p>This document narrows <code>0103</code> deliberately.
+When this design says <code>publish</code>, it means the target-publication family exposed today by:</p>
+<ul>
+<li><code>binding_current_value_publication_token</code>,</li>
+<li><code>PublishTargetReplica</code>,</li>
+<li><code>StartPublishTargetReplica</code>,</li>
+<li>and the SDK helpers that observe those operations.</li>
+</ul>
+<p>It does <strong>not</strong> retake repository-wide ownership of the bare word <code>publish</code>.
+Across the repo, artifact truth, worker-local realization, instance hydration, and cluster rollout remain separate scopes
+owned by other designs.
+<code>0103</code> owns only the target-publication family:</p>
+<ul>
+<li>the volatile subject promoted by target-backed materialization,</li>
+<li>the currentness domain for that target,</li>
+<li>the concrete issued publication instance,</li>
+<li>and the owner-local fail-closed fence that keeps same-subject attach honest.</li>
+</ul>
+<p>What is missing is <strong>not</strong> a new repository-wide semantic kernel.
+What is missing is the target-publication specialization that maps this landed path onto the existing repository-wide
+kernels from <code>0092</code>, <code>0094</code>, <code>0096</code>, and <code>0100</code>.</p>
+<p>The long-term projection is:</p>
+<ul>
+<li><code>Artifact</code>, <code>ArtifactSelection</code>, and <code>SelectionIdentity</code> answer <strong>what bytes</strong>,</li>
+<li><code>ReplicaKey</code> answers <strong>which concrete daemon-owned replica exists in core/store</strong>,</li>
+<li><code>PublicationSubjectKey</code> answers <strong>which stable target-domain currentness key is being discussed</strong>,</li>
+<li>logical <code>PublicationOwnerFence</code> answers <strong>whether same-subject attach is still honest</strong>, but dependency-ready carriage
+  reuses <code>LifecycleEpochs.subject_generation</code> and, only when needed, <code>FencingContext</code>,</li>
+<li><code>PublicationInstanceId</code> answers <strong>which concrete issued target publication currently owns that subject</strong>,</li>
+<li>and <code>Operation[T]</code> answers <strong>how callers later observe that chosen instance</strong>.</li>
+</ul>
+<p><code>0103</code> therefore does <strong>not</strong> introduce:</p>
+<ul>
+<li>a fourth repository-wide identity lattice,</li>
+<li>a second lifecycle non-reuse mechanism beside <code>subject_generation</code> and <code>fencing_context</code>,</li>
+<li>or a second continuation family beside <code>Operation[T]</code>.</li>
+</ul>
+<p>The current dependency-ready mode is only:</p>
+<ul>
+<li><code>local_ephemeral</code></li>
+</ul>
+<p>A future low-cardinality coordinated mode may exist, but it is a follow-up seam, not a second co-equal branch in this
+design.</p>
+<p>Finally, this design fixes the multi-daemon case explicitly:</p>
+<ul>
+<li>the same artifact may legally be promoted into multiple distinct target-publication subjects at once,</li>
+<li>those are many child subject domains, not one artifact-global publish workflow,</li>
+<li>and higher-level "replicate this artifact to N places" intent belongs to orchestration in <code>0056</code>, <code>0102</code>, and <code>0104</code>,
+  not to one publication subject.</li>
+</ul>
+<h1 id="current-landed-reality">Current Landed Reality<a class="headerlink" href="#current-landed-reality" title="Permanent link">&para;</a></h1>
+<p>Current code already implements a concrete target-publication closeout path.</p>
+<p>That landed path should be described honestly before future cleanup is proposed:</p>
+<ul>
+<li>target-domain currentness is tracked by <code>TargetPublicationRegistry::latest_by_target_</code>,</li>
+<li>the concrete issued publication instance is <code>publication_id</code>,</li>
+<li>the current implementation precursor for target-domain identity is <code>publication_key</code>,</li>
+<li><code>WorkflowCompanionRef.currentness_key</code> already mirrors that target-domain precursor,</li>
+<li>lifecycle capability minting for <code>publication_target</code> already exists but currently fixes <code>subject_generation = 1</code>,</li>
+<li>public continuation already projects through <code>OperationRef</code>,</li>
+<li>and the recovery class is <code>ephemeral_process_local</code>.</li>
+</ul>
+<p>Current <code>OperationRef</code> projection for target publication already carries:</p>
+<ul>
+<li><code>operation_id</code>,</li>
+<li><code>kind</code>,</li>
+<li><code>target_artifact_id</code>,</li>
+<li><code>authority_scope_kind</code>,</li>
+<li><code>authority_scope_id</code>,</li>
+<li><code>attachment_kind</code>,</li>
+<li><code>recovery_class</code>,</li>
+<li>and optional <code>fencing_digest</code>.</li>
+</ul>
+<p>This design therefore does not reopen or replace the first landed <code>attach_existing -&gt; Operation[T]</code> closeout path from
+<code>0096</code> and <code>0100</code>.</p>
+<p>Its job is narrower:</p>
+<ul>
+<li>explain the semantic object model underneath that path,</li>
+<li>split stable subject identity from owner-local fence facts without pretending every refactor already landed,</li>
+<li>keep currentness and multi-replica behavior conceptually correct,</li>
+<li>and guide cleanup of implementation-shaped names without overclaiming substrate that does not exist yet.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<h2 id="1-target-publication-still-lacks-a-stable-object-model">1. Target publication still lacks a stable object model<a class="headerlink" href="#1-target-publication-still-lacks-a-stable-object-model" title="Permanent link">&para;</a></h2>
+<p>Current code already has meaningful publish primitives:</p>
+<ul>
+<li><code>BindingCurrentValuePublicationScope</code></li>
+<li><code>binding_current_value_publication_token</code></li>
+<li><code>TargetPublicationRegistry</code></li>
+<li><code>StartPublishTargetReplica</code></li>
+<li>and the SDK <code>publish_replica_operation()</code> helpers</li>
+</ul>
+<p>But the repository still lacks one explicit answer to:</p>
+<ul>
+<li>what exact semantic object is current for target publication?</li>
+</ul>
+<p>Today the implementation implicitly mixes:</p>
+<ul>
+<li>target memory placement facts,</li>
+<li>owner-local process facts,</li>
+<li>per-target currentness,</li>
+<li>attach or replay semantics,</li>
+<li>and operation tracking.</li>
+</ul>
+<p>That is workable for a local sample path, but not durable enough as a repository-wide architectural contract.</p>
+<h2 id="2-same-artifact-same-target-subject-and-same-issued-publication-are-different-questions">2. Same artifact, same target subject, and same issued publication are different questions<a class="headerlink" href="#2-same-artifact-same-target-subject-and-same-issued-publication-are-different-questions" title="Permanent link">&para;</a></h2>
+<p>In realistic serving and engine-integration flows, the same artifact may be published:</p>
+<ul>
+<li>on daemon A and daemon B,</li>
+<li>onto different devices,</li>
+<li>into different serving slots,</li>
+<li>or as different temporary warm replicas.</li>
+</ul>
+<p>If the repository treats <code>artifact_id</code> as the publish conflict domain, valid multi-replica behavior is falsely
+serialized.</p>
+<p>If the repository treats every publish as independent, it cannot express:</p>
+<ul>
+<li>"this slot already has an in-flight publish",</li>
+<li>"this target is stale",</li>
+<li>or "attach to the current publish for this target."</li>
+</ul>
+<p>The missing abstraction is the publication subject:</p>
+<ul>
+<li>more specific than artifact identity,</li>
+<li>broader than one concrete <code>operation_id</code>,</li>
+<li>and scoped to target-domain currentness.</li>
+</ul>
+<h2 id="3-owner-local-fencing-is-real-but-it-is-not-the-same-as-subject-identity">3. Owner-local fencing is real, but it is not the same as subject identity<a class="headerlink" href="#3-owner-local-fencing-is-real-but-it-is-not-the-same-as-subject-identity" title="Permanent link">&para;</a></h2>
+<p>Current code still uses owner-local facts, especially <code>owner_pid</code>, in both publication-key precursors and token
+validation.</p>
+<p>That behavior is not accidental noise.
+It provides honest fail-closed behavior for <code>local_ephemeral</code> publication today.</p>
+<p>But owner-local facts answer a different question:</p>
+<ul>
+<li>"is this still the same attachable owner?"</li>
+</ul>
+<p>They do <strong>not</strong> answer:</p>
+<ul>
+<li>"is this still the same target-publication domain?"</li>
+</ul>
+<p>If the repository keeps those two questions merged forever, a replacement owner on the same target will be mistaken for a
+brand-new semantic subject.
+That distorts <code>owner_lost</code>, <code>stale_current</code>, and same-subject attach semantics.</p>
+<p>If the repository responds by inventing a second publication-private rebinding or fencing carrier, it will merely move
+the ambiguity:</p>
+<ul>
+<li><code>0094</code> already owns <code>subject_generation</code> and <code>fencing_context</code>,</li>
+<li>target publication would then have a second non-reuse dialect,</li>
+<li>and attach honesty would become split between lifecycle truth and publication-private state.</li>
+</ul>
+<p>That would make the system broader, not deeper.</p>
+<h2 id="4-operationt-is-a-continuation-surface-not-publication-truth">4. <code>Operation[T]</code> is a continuation surface, not publication truth<a class="headerlink" href="#4-operationt-is-a-continuation-surface-not-publication-truth" title="Permanent link">&para;</a></h2>
+<p><code>0055</code> correctly defines <code>Operation[T]</code> as the caller-visible continuation surface for long-tail control-plane work.</p>
+<p>But <code>Operation[T]</code> alone does not answer:</p>
+<ul>
+<li>whether this request belongs to the same publication subject,</li>
+<li>whether another daemon publishing the same artifact is a conflict or an independent child publish,</li>
+<li>or whether stale-current and owner-loss should attach to this operation at all.</li>
+</ul>
+<p>Without a publication-subject model, the implementation starts forcing semantic decisions into:</p>
+<ul>
+<li>operation lease behavior,</li>
+<li>public continuation metadata,</li>
+<li>or transport-layer errors.</li>
+</ul>
+<p>That is the wrong layer.</p>
+<h2 id="5-the-repository-cannot-afford-another-global-meaning-of-publish">5. The repository cannot afford another global meaning of <code>publish</code><a class="headerlink" href="#5-the-repository-cannot-afford-another-global-meaning-of-publish" title="Permanent link">&para;</a></h2>
+<p><code>0056</code>, <code>0102</code>, and <code>0104</code> already separate:</p>
+<ul>
+<li>high-cardinality set orchestration,</li>
+<li>engine integration action vocabulary,</li>
+<li>worker-local stable realization,</li>
+<li>instance hydration,</li>
+<li>and cluster rollout.</li>
+</ul>
+<p>If <code>0103</code> is read as retaking repository-wide ownership of the bare word <code>publish</code>, the repository falls back into the
+same ambiguity it is trying to remove.</p>
+<p>This design therefore must define one narrow family contract for target publication, not a second repository-wide verb.</p>
+<h2 id="6-not-every-target-publication-should-become-a-globally-coordinated-workflow">6. Not every target publication should become a globally coordinated workflow<a class="headerlink" href="#6-not-every-target-publication-should-become-a-globally-coordinated-workflow" title="Permanent link">&para;</a></h2>
+<p>The published object here is a block of volatile memory.
+That makes target publication valuable for short-lived reuse, warmup, and routing, but it does not automatically justify:</p>
+<ul>
+<li>a durable per-blob truth record,</li>
+<li>cluster-global replay for every publication,</li>
+<li>or a Global Store hot path for all target-backed publish traffic.</li>
+</ul>
+<p>The repository therefore needs:</p>
+<ul>
+<li>one mode that matches today's local-ephemeral publish reality,</li>
+<li>and one explicitly separate future seam for low-cardinality coordinated slots.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Define target publication as a publication-subject model over volatile target memory.</li>
+<li>Define <code>0103</code> as a composition over existing repository-wide kernels rather than as a new parallel semantic system.</li>
+<li>Separate artifact identity, replica identity, publication subject currentness, lifecycle non-reuse, publication
+  instance, and operation continuation.</li>
+<li>Make the publish conflict domain and currentness domain explicit.</li>
+<li>Support multiple daemons publishing the same artifact into different target-publication subjects without false
+  conflicts.</li>
+<li>Keep today's target-backed publish path valid as <code>local_ephemeral</code> publication.</li>
+<li>Reuse <code>0094</code> carriers for same-subject non-reuse:</li>
+<li><code>LifecycleSubjectRecord.subject_id</code>,</li>
+<li><code>LifecycleEpochs.subject_generation</code>,</li>
+<li>and optional <code>FencingContext</code> when a future authority mode genuinely needs it.</li>
+<li>Keep <code>0096</code> semantic algebra and <code>0100</code> public continuation algebra unchanged in ownership while clarifying their
+  target-publication binding.</li>
+<li>Keep orchestration of multiple child publications in <code>0056</code>, <code>0102</code>, and <code>0104</code> rather than overloading one publish
+  subject.</li>
+<li>Give one explicit cross-layer projection from:</li>
+<li>stable target-domain identity,</li>
+<li>to workflow <code>currentness_key</code>,</li>
+<li>to lifecycle runtime anchor and generation,</li>
+<li>to publication instance,</li>
+<li>to public continuation.</li>
+<li>Reuse existing repository primitives where possible, especially:</li>
+<li><code>TargetPublicationRegistry::latest_by_target_</code></li>
+<li><code>ReplicaKey</code></li>
+<li><code>Operation[T]</code></li>
+<li>and <code>MetadataGateway</code> publish-context idempotency patterns</li>
+<li>Keep the current public continuation surface instance-scoped unless a separate proposal proves a need to widen it.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine <code>Artifact</code>, <code>ArtifactSelection</code>, <code>SelectionIdentity</code>, or sealed byte-artifact publication units from <code>0078</code>
+  and <code>0087</code>.</li>
+<li>Retake ownership of the repository-wide action vocabulary from <code>0102</code> or <code>0104</code>.</li>
+<li>Turn volatile publish into a durability feature.</li>
+<li>Replace <code>ReplicaKey</code> as the replica identity.</li>
+<li>Make every publish path globally coordinated.</li>
+<li>Push high-cardinality target publication truth into Global Store.</li>
+<li>Introduce a second user-visible continuation family beside <code>Operation[T]</code>.</li>
+<li>Introduce a second repository-wide owner-fence or rebinding carrier beside <code>subject_generation</code> and
+  <code>fencing_context</code>.</li>
+<li>Collapse multi-daemon replication intent into one artifact-global publish workflow.</li>
+<li>Define the final coordinated-slot storage schema in this document.</li>
+<li>Require an immediate public proto change just to adopt the subject model.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="1-repository-wide-kernels-and-0103-position">1. Repository-wide kernels and <code>0103</code> position<a class="headerlink" href="#1-repository-wide-kernels-and-0103-position" title="Permanent link">&para;</a></h2>
+<pre class="mermaid"><code>flowchart TB
+  A["Selection kernel&lt;br&gt;ArtifactSelection / SelectionIdentity"] --&gt; B["Workflow currentness&lt;br&gt;PublicationSubjectKey -&gt; currentness_key"]
+  B --&gt; C["Lifecycle non-reuse&lt;br&gt;subject_id + subject_generation"]
+  C --&gt; D["PublicationInstanceId&lt;br&gt;publication_id"]
+  D --&gt; E["Operation[T]&lt;br&gt;public wait, status, cancel"]
+  F["ReplicaKey&lt;br&gt;one concrete daemon-owned replica"] --&gt; D
+  G["Replication intent&lt;br&gt;replicate artifact to many targets"] --&gt; B</code></pre>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Canonical object</th>
+<th>Owner</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>What bytes are being discussed</td>
+<td><code>Artifact</code>, <code>ArtifactSelection</code>, <code>SelectionIdentity</code></td>
+<td><code>0055</code>, <code>0078</code>, <code>0087</code></td>
+</tr>
+<tr>
+<td>One concrete daemon-owned replica</td>
+<td><code>ReplicaKey</code></td>
+<td><code>0055</code>, <code>0093</code></td>
+</tr>
+<tr>
+<td>One stable target-domain currentness key</td>
+<td><code>PublicationSubjectKey</code> lowering to workflow <code>currentness_key</code></td>
+<td><code>0103</code> over <code>0096</code> / <code>0094</code></td>
+</tr>
+<tr>
+<td>One issuer-local runtime anchor for bounded publication admission</td>
+<td><code>LifecycleSubjectRecord.subject_id</code></td>
+<td><code>0094</code></td>
+</tr>
+<tr>
+<td>One same-subject non-reuse carrier</td>
+<td><code>LifecycleEpochs.subject_generation</code> and optional <code>FencingContext</code></td>
+<td><code>0094</code></td>
+</tr>
+<tr>
+<td>One concrete issued publish instance</td>
+<td><code>PublicationInstanceId</code></td>
+<td><code>0103</code></td>
+</tr>
+<tr>
+<td>Caller-visible continuation</td>
+<td><code>Operation[T]</code></td>
+<td><code>0055</code>, <code>0100</code></td>
+</tr>
+<tr>
+<td>Replicate this artifact to many targets</td>
+<td>orchestration or manifest-backed replication intent</td>
+<td><code>0056</code>, <code>0102</code>, <code>0104</code></td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li><code>artifact_id</code> is never, by itself, the publish conflict domain.</li>
+<li><code>ReplicaKey</code> is the replica identity and remains distinct from operation identity.</li>
+<li><code>0103</code> does not introduce a new repository-wide semantic kernel; it specializes existing workflow and lifecycle
+   carriers for target publication.</li>
+<li><code>PublicationSubjectKey</code> is workflow currentness truth for target publication; it is not a competing replacement for
+   <code>ReplicaKey</code>, <code>subject_id</code>, or <code>operation_id</code>.</li>
+<li>Logical <code>PublicationOwnerFence</code> in dependency-ready <code>local_ephemeral</code> mode is carried by existing lifecycle
+   <code>subject_generation</code>; if a future coordinated mode needs authority-turnover fencing, it must use existing
+   <code>fencing_context</code>.</li>
+<li><code>Operation[T]</code> is a public continuation contract, not publication semantic truth.</li>
+<li>A multi-target replication workflow is a parent orchestration concept and must not be collapsed into one publish
+   subject.</li>
+<li><code>0103</code> owns only target-publication semantics; it must not be read as redefining every repository use of bare
+   <code>publish</code>.</li>
+</ol>
+<h2 id="2-publication-subject-owner-fence-publication-instance-and-projection-crosswalk">2. Publication subject, owner fence, publication instance, and projection crosswalk<a class="headerlink" href="#2-publication-subject-owner-fence-publication-instance-and-projection-crosswalk" title="Permanent link">&para;</a></h2>
+<p>This design introduces three explicit concepts plus one required cross-layer projection rule.</p>
+<h3 id="21-publicationsubjectkey">2.1 <code>PublicationSubjectKey</code><a class="headerlink" href="#21-publicationsubjectkey" title="Permanent link">&para;</a></h3>
+<p><code>PublicationSubjectKey</code> names the stable target-domain currentness key whose replay and replacement behavior are being
+decided.</p>
+<p>It is a <strong>structured workflow truth object</strong>.
+It is not a second repository-wide subject system beside <code>SelectionIdentity</code>, <code>ReplicaKey</code>, or lifecycle <code>subject_id</code>.</p>
+<p>Long-term required contents:</p>
+<ul>
+<li>stable target-domain scope,</li>
+<li>resolved selection identity,</li>
+<li>normalized byte-space identity,</li>
+<li>and stable target-domain identity sufficient to distinguish different target domains.</li>
+</ul>
+<p>Expected target-scope inputs include:</p>
+<ul>
+<li>daemon or worker identity when that identity is part of the target domain,</li>
+<li>device identity,</li>
+<li>target layout or serving-slot identity when relevant,</li>
+<li>and any explicit integration-owned slot or role id.</li>
+</ul>
+<p><code>PublicationSubjectKey</code> must <strong>not</strong> contain:</p>
+<ul>
+<li><code>publication_id</code>,</li>
+<li><code>operation_id</code>,</li>
+<li><code>owner_pid</code>,</li>
+<li><code>subject_generation</code>,</li>
+<li>capability ids,</li>
+<li>lease ids or TTL,</li>
+<li>or fresh retry UUIDs.</li>
+</ul>
+<p>Current-code grounding:</p>
+<ul>
+<li>today's <code>TargetPublicationRegistry::publication_key</code> is a precursor to this concept,</li>
+<li><code>latest_by_target_</code> already expresses per-target currentness rather than artifact-global currentness,</li>
+<li>but the current key is still too tied to immediate owner-local facts such as <code>owner_pid</code>.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>PublicationSubjectKey</code> answers stable target-domain identity, not current owner identity.</li>
+<li>If two requests claim the same <code>PublicationSubjectKey</code>, they are claiming the same currentness domain.</li>
+<li><code>PublicationSubjectKey</code> must be defined as a structured semantic object before any hash or string encoding is chosen.</li>
+<li>Dependency-ready carriage of this subject truth must lower through <code>WorkflowCompanionRef.currentness_key</code>; new code
+   must not invent a second parallel currentness carrier.</li>
+<li>Source-replica identity and source-side publication barriers remain separate concerns:</li>
+<li><code>ReplicaKey</code> continues to identify a concrete daemon-owned replica,</li>
+<li>source-side <code>publish</code> in <code>0102</code> remains a different scope,</li>
+<li>target-domain currentness must not silently turn into a second source-replica identity system.</li>
+<li>Current code may temporarily materialize a composite precursor string, but that precursor is implementation detail,
+   not the canonical contract.</li>
+</ol>
+<h3 id="22-publicationownerfence">2.2 <code>PublicationOwnerFence</code><a class="headerlink" href="#22-publicationownerfence" title="Permanent link">&para;</a></h3>
+<p><code>PublicationOwnerFence</code> is a <strong>logical relation</strong>, not a new persisted repository-wide carrier.</p>
+<p>It names the facts that make same-subject attach or replay honest in <code>local_ephemeral</code> mode.
+Dependency-ready carriage of those facts reuses existing <code>0094</code> mechanisms:</p>
+<ul>
+<li><code>LifecycleSubjectRecord.subject_id</code> anchors the issuer-local runtime subject,</li>
+<li><code>LifecycleEpochs.subject_generation</code> carries same-subject rebinding or non-reuse,</li>
+<li>and optional <code>FencingContext</code> remains reserved for future authority-turnover modes that truly need routed fencing.</li>
+</ul>
+<p>Current-code grounding:</p>
+<ul>
+<li>today's <code>owner_pid</code> checks already contribute to token validation,</li>
+<li>today's <code>publication_key</code> also folds owner-local facts into the currentness precursor,</li>
+<li>and the landed workflow recovery class is <code>ephemeral_process_local</code>.</li>
+</ul>
+<p>Current dependency-ready interpretation:</p>
+<ul>
+<li><code>owner_pid</code> is a local observation that helps token validation fail closed,</li>
+<li>same-subject rebinding should ultimately advance <code>subject_generation</code>,</li>
+<li>and a future mode that requires authority-turnover fencing must use <code>fencing_context</code> rather than invent a parallel
+  anonymous epoch.</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>PublicationOwnerFence</code> is documentation shorthand over existing lifecycle and fencing carriers; it is not a second
+   persisted identity or wire contract.</li>
+<li>Same subject with a replaced owner fence is a subject-local replacement, not evidence of a brand-new target domain.</li>
+<li>In dependency-ready <code>local_ephemeral</code>, same-subject replacement must be represented as stable subject anchor plus a
+   newer <code>subject_generation</code>, not as a silent reuse of old attach semantics.</li>
+<li>Local observations such as <code>owner_pid</code> may participate in token admission and fail-closed checks, but they do not
+   define stable subject identity and do not become public continuation identity.</li>
+<li>If a future coordinated mode requires authority-turnover fencing beyond local rebinding, it must reuse
+   <code>FencingContext</code>.</li>
+<li>Owner loss or replacement must fail closed for old continuations and old tokens.</li>
+<li>This split mirrors the <code>0094</code> rule that stable subject identity and local reuse or fencing state are different
+   objects.</li>
+</ol>
+<h3 id="23-publicationinstanceid">2.3 <code>PublicationInstanceId</code><a class="headerlink" href="#23-publicationinstanceid" title="Permanent link">&para;</a></h3>
+<p><code>PublicationInstanceId</code> names one concrete issued publication under a subject.</p>
+<p>Current-code grounding:</p>
+<ul>
+<li>today's <code>publication_id</code> already behaves like a concrete issued publication instance.</li>
+</ul>
+<p>Rules:</p>
+<ol>
+<li>One <code>PublicationSubjectKey</code> may have many publication instances over time.</li>
+<li>At most one instance may be current for a subject at a time.</li>
+<li>Replay and attach decisions are evaluated within a subject, not across unrelated subjects.</li>
+<li>In the current landed implementation, dependency-ready semantics are current-instance semantics; richer non-current
+   history remains future work unless an explicit bounded-history substrate lands.</li>
+</ol>
+<h3 id="24-canonical-cross-layer-projection">2.4 Canonical cross-layer projection<a class="headerlink" href="#24-canonical-cross-layer-projection" title="Permanent link">&para;</a></h3>
+<p>The design is only useful if target-publication semantics lower into the existing carriers unambiguously.</p>
+<table>
+<thead>
+<tr>
+<th>Concern</th>
+<th>Canonical semantic object</th>
+<th>Dependency-ready carrier today</th>
+<th>Current code grounding</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stable target-domain currentness</td>
+<td><code>PublicationSubjectKey</code></td>
+<td><code>WorkflowCompanionRef.currentness_key</code></td>
+<td><code>publication_key</code> precursor</td>
+</tr>
+<tr>
+<td>Issuer-local runtime anchor for bounded publication admission</td>
+<td>same target-domain runtime anchor</td>
+<td><code>LifecycleSubjectRecord.subject_id</code></td>
+<td><code>publication-target:&lt;publication_key precursor&gt;</code></td>
+</tr>
+<tr>
+<td>Same-subject non-reuse or rebinding</td>
+<td>logical <code>PublicationOwnerFence</code></td>
+<td><code>LifecycleEpochs.subject_generation</code>; optional <code>FencingContext</code> only for future authority turnover</td>
+<td>currently fixed at <code>1</code></td>
+</tr>
+<tr>
+<td>Concrete issued publication instance</td>
+<td><code>PublicationInstanceId</code></td>
+<td><code>publication_id</code>, <code>WorkflowCompanionRef.workflow_id</code>, <code>OperationRef.authority_scope_id</code></td>
+<td><code>publication_id</code></td>
+</tr>
+<tr>
+<td>Caller-visible continuation</td>
+<td>chosen publication instance</td>
+<td><code>OperationRef</code></td>
+<td>current <code>attach_existing -&gt; Operation[T]</code> path</td>
+</tr>
+<tr>
+<td>Request-local owner observation</td>
+<td>local admission-only fact</td>
+<td><code>BindingCurrentValuePublicationScope.owner_pid</code> and local observations</td>
+<td>current owner PID checks</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rules:</p>
+<ol>
+<li>This table is the only dependency-ready cross-layer projection for target publication in this phase.</li>
+<li>New code must not create an ad hoc second semantic id when one of the carriers above already owns that role.</li>
+<li><code>LifecycleSubjectRecord.semantic_ref_id</code> may remain a runtime anchor for implementation convenience, but it must not
+   redefine publication currentness truth.</li>
+<li><code>BindingCurrentValuePublicationScope</code> is the ingress credential scope and
+   request-shaping carrier; it is not the canonical repository-wide subject
+   schema.</li>
+</ol>
+<h3 id="25-current-code-bridge">2.5 Current-code bridge<a class="headerlink" href="#25-current-code-bridge" title="Permanent link">&para;</a></h3>
+<p>Current code still uses owner-local facts, especially <code>owner_pid</code>, in both publication-key precursors and token
+validation.</p>
+<p>That is not purely accidental implementation noise.
+For <code>local_ephemeral</code> publish today, those facts contribute to honest fail-closed behavior:</p>
+<ul>
+<li>they help distinguish one volatile owner from another,</li>
+<li>they prevent a replacement process from being mistaken for the same still-attachable owner,</li>
+<li>and they align with the current <code>ephemeral_process_local</code> recovery class.</li>
+</ul>
+<p>Current-reality rule:</p>
+<ul>
+<li>this design does not require immediate removal of <code>owner_pid</code> from the landed implementation precursor,</li>
+<li>but it interprets that precursor as a temporary encoding of:</li>
+<li>stable <code>PublicationSubjectKey</code>,</li>
+<li>plus request-local owner observation,</li>
+<li>plus the not-yet-extracted same-subject rebinding relation that should converge on <code>subject_generation</code>,</li>
+<li>not as the long-term semantic definition of target-domain identity itself.</li>
+</ul>
+<h2 id="3-dependency-ready-mode-and-future-extension-seam">3. Dependency-ready mode and future extension seam<a class="headerlink" href="#3-dependency-ready-mode-and-future-extension-seam" title="Permanent link">&para;</a></h2>
+<h3 id="31-local_ephemeral">3.1 <code>local_ephemeral</code><a class="headerlink" href="#31-local_ephemeral" title="Permanent link">&para;</a></h3>
+<p>This is the default mode and the mode that matches today's landed code.</p>
+<p>Properties:</p>
+<ul>
+<li>publication truth lives on the issuer daemon,</li>
+<li>target-domain currentness projects through workflow <code>currentness_key</code>,</li>
+<li>bounded publication admission projects through lifecycle <code>publication_target</code> subject state,</li>
+<li>same-subject rebinding should converge on lifecycle <code>subject_generation</code>,</li>
+<li>owner loss fails closed,</li>
+<li>attach and replay are only as strong as the daemon-local publication state,</li>
+<li>and the mode is suitable for short-lived warm replicas and target-backed reuse.</li>
+</ul>
+<p>Examples:</p>
+<ul>
+<li><code>MaterializeIntoTarget</code> followed by publish on the same daemon</li>
+<li>mapped binding publish</li>
+<li>slot-backed local warm replica promotion</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li><code>local_ephemeral</code> publication is a valid repository feature and should remain supported.</li>
+<li><code>local_ephemeral</code> is not, by itself, proof that repo-wide distributed continuation is dependency-ready.</li>
+<li>If owner state is lost or same-subject generation advances, later observation must surface explicit owner loss or
+   unavailable semantics rather than reopening the subject silently.</li>
+<li>The dependency-ready semantics in this mode are the triple:</li>
+<li>same <code>currentness_key</code>,</li>
+<li>same <code>subject_generation</code>,</li>
+<li>and same current <code>publication_id</code>.</li>
+<li>That triple yields the following dependency-ready outcomes:</li>
+<li>same-currentness plus same-generation plus same-current in-flight instance -&gt; attach,</li>
+<li>same-currentness plus same-generation plus same-current terminal instance -&gt; terminal reuse,</li>
+<li>same-currentness plus newer generation -&gt; owner loss or replacement fail-closed,</li>
+<li>same-currentness plus older non-current instance -&gt; stale-current reject.</li>
+<li>Current-instance terminal reuse is dependency-ready only for the same current instance already identified through the
+   currentness, generation, and instance chain.</li>
+<li>Richer non-current historical replay or reusable-terminal semantics must not be overclaimed unless an explicit
+   bounded-history substrate is added.</li>
+</ol>
+<h3 id="32-future-extension-seam-coordinated_slot">3.2 Future extension seam: <code>coordinated_slot</code><a class="headerlink" href="#32-future-extension-seam-coordinated_slot" title="Permanent link">&para;</a></h3>
+<p>A future low-cardinality coordinated target-publication mode may exist where coordination is worth the cost.
+That possibility is intentionally a follow-up seam, not a second co-equal dependency-ready branch in this design.</p>
+<p>Potential examples:</p>
+<ul>
+<li>serving slot activation</li>
+<li>explicit "current source replica" slot for a managed worker role</li>
+</ul>
+<p>Normative rules:</p>
+<ol>
+<li>No current code or adjacent design may depend on <code>coordinated_slot</code> to justify present-day <code>0103</code> claims.</li>
+<li>If pursued, <code>coordinated_slot</code> must not become a high-cardinality Global Store hot path.</li>
+<li>If pursued, <code>coordinated_slot</code> truth must remain separate from <code>Operation[T]</code> rows.</li>
+<li>Any adoption of this mode must separately define subject owner, storage schema, and recovery claims before it
+   becomes dependency-ready.</li>
+<li>Any fencing or authority-turnover rule in this mode must reuse existing <code>FencingContext</code>; it must not create a
+   parallel publication-private fence dialect.</li>
+</ol>
+<h2 id="4-workflow-and-continuation-mapping">4. Workflow and continuation mapping<a class="headerlink" href="#4-workflow-and-continuation-mapping" title="Permanent link">&para;</a></h2>
+<p>For the landed target-publication workflow, <code>0096</code> continues to own the workflow-semantic answer space:</p>
+<ul>
+<li><code>admit_new</code></li>
+<li><code>replay_attachable</code></li>
+<li><code>replay_terminal</code></li>
+<li><code>stale_current</code></li>
+<li><code>fenced</code></li>
+<li><code>cancelled</code></li>
+<li><code>owner_lost</code></li>
+<li><code>wait_not_ready</code></li>
+</ul>
+<p><code>0100</code> continues to own the public projection algebra:</p>
+<ul>
+<li><code>continue_with_authority</code></li>
+<li><code>attach_existing</code></li>
+<li><code>terminal</code></li>
+<li><code>retry_later</code></li>
+<li>and <code>Operation[T]</code> as the default public continuation surface</li>
+</ul>
+<p><code>0103</code> owns the target-publication object-model binding between those two layers:</p>
+<ul>
+<li>what counts as the same target-domain currentness key,</li>
+<li>what counts as the same currentness key with a newer lifecycle generation,</li>
+<li>what counts as a different target domain for the same artifact,</li>
+<li>and which currentness, generation, and instance combinations are dependency-ready in <code>local_ephemeral</code>.</li>
+</ul>
+<h3 id="41-required-subject-level-outcomes">4.1 Required subject-level outcomes<a class="headerlink" href="#41-required-subject-level-outcomes" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Situation</th>
+<th><code>currentness_key</code> relation</th>
+<th>lifecycle relation</th>
+<th>instance relation</th>
+<th>Required semantic answer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Same subject, same current in-flight instance</td>
+<td>same</td>
+<td>same <code>subject_generation</code></td>
+<td>same current instance</td>
+<td><code>replay_attachable</code></td>
+</tr>
+<tr>
+<td>Same subject, same current terminal instance</td>
+<td>same</td>
+<td>same <code>subject_generation</code></td>
+<td>same current terminal instance</td>
+<td><code>replay_terminal</code></td>
+</tr>
+<tr>
+<td>Same stable subject, but owner was replaced or lost in <code>local_ephemeral</code> mode</td>
+<td>same</td>
+<td>newer or unavailable generation</td>
+<td>any old instance</td>
+<td><code>owner_lost</code></td>
+</tr>
+<tr>
+<td>Same subject, request targets older non-current instance</td>
+<td>same</td>
+<td>same or recoverably comparable generation</td>
+<td>older non-current instance</td>
+<td><code>stale_current</code></td>
+</tr>
+<tr>
+<td>Different subject, same artifact, different daemon or target scope</td>
+<td>different</td>
+<td>irrelevant</td>
+<td>irrelevant</td>
+<td>independent publish; no attach</td>
+</tr>
+</tbody>
+</table>
+<p>Current dependency-ready floor:</p>
+<ul>
+<li><code>replay_attachable</code> for same-currentness, same-generation, same-current publish,</li>
+<li><code>replay_terminal</code> for same-currentness, same-generation, same-current terminal reuse,</li>
+<li><code>stale_current</code> reject for non-current instance under the same currentness domain,</li>
+<li>and <code>owner_lost</code> fail-closed observation for same currentness domain with replaced or unavailable generation.</li>
+</ul>
+<p>Non-current historical <code>replay_terminal</code> reuse is conceptually valid but must not be treated as dependency-ready unless
+the implementation grows an explicit bounded-history contract.</p>
+<p>Normative rules:</p>
+<ol>
+<li>Attach, replay, and stale-current are defined by currentness key plus lifecycle generation plus instance relation,
+   not by artifact id alone.</li>
+<li>In <code>local_ephemeral</code>, the same subject remains attachable only if both currentness and same-subject generation still
+   match.</li>
+<li>Different daemons publishing the same artifact into different replica domains must not be forced into one shared
+   subject.</li>
+<li><code>Operation[T]</code> is per chosen publication instance, not per artifact and not per multi-target replication intent.</li>
+<li>Public continuation remains instance-scoped. Current <code>OperationRef</code> may therefore keep identifying the chosen
+   <code>publication_id</code>, while daemon-side admission must recover currentness and generation truth from that instance and
+   validate currentness fail-closed.</li>
+<li><code>owner_pid</code> or other local observations are admission hints only; they do not become public continuation identity.</li>
+</ol>
+<h2 id="5-multi-replica-orchestration">5. Multi-replica orchestration<a class="headerlink" href="#5-multi-replica-orchestration" title="Permanent link">&para;</a></h2>
+<p>When a higher-level workflow wants the same artifact published to multiple places, the intended structure is:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["Replication intent&lt;br&gt;replicate artifact X to A, B, C"] --&gt; B["Child target-publication subject on A"]
+  A --&gt; C["Child target-publication subject on B"]
+  A --&gt; D["Child target-publication subject on C"]
+  B --&gt; E["Operation[T] for A"]
+  C --&gt; F["Operation[T] for B"]
+  D --&gt; G["Operation[T] for C"]</code></pre>
+<p>Rules:</p>
+<ol>
+<li>Multi-daemon or multi-slot publication is orchestration over many child target-publication subjects.</li>
+<li>One child publish succeeding must not imply that every sibling publish succeeded.</li>
+<li><code>0056</code>, <code>0102</code>, and <code>0104</code> own the parent orchestration layer for this fanout; <code>0103</code> does not define the parent
+   set carrier, rollout barrier, or source-retention semantics.</li>
+<li><code>0103</code> does not retake ownership of bare repo-wide <code>publish</code>; adjacent designs must use explicit scope terms when
+   they mean source issue, worker realization, target publication, or rollout.</li>
+<li><code>0103</code> supplies only the child target-publication semantics used inside those parents.</li>
+</ol>
+<h2 id="6-evolution-strategy-for-adjacent-designs">6. Evolution strategy for adjacent designs<a class="headerlink" href="#6-evolution-strategy-for-adjacent-designs" title="Permanent link">&para;</a></h2>
+<p>This design evolves the existing design set; it does not replace it.</p>
+<h3 id="61-0094">6.1 <code>0094</code><a class="headerlink" href="#61-0094" title="Permanent link">&para;</a></h3>
+<p>Required amendment:</p>
+<ul>
+<li>keep <code>0094</code> as the owner of lifecycle runtime anchors, <code>subject_generation</code>, <code>fencing_context</code>, and
+  <code>WorkflowCompanionRef</code>,</li>
+<li>treat <code>PublicationOwnerFence</code> as the target-publication interpretation of those carriers rather than as a parallel
+  persisted model,</li>
+<li>require same-subject rebinding in target publication to converge on <code>subject_generation</code>,</li>
+<li>and keep <code>WorkflowCompanionRef.currentness_key</code> as the lifecycle-facing carrier for target-domain currentness.</li>
+</ul>
+<p>No deletion is required.</p>
+<h3 id="62-0096">6.2 <code>0096</code><a class="headerlink" href="#62-0096" title="Permanent link">&para;</a></h3>
+<p>Required amendment:</p>
+<ul>
+<li>keep <code>0096</code> as the owner of workflow-semantic algebra,</li>
+<li>keep its first landed target-publication closeout path intact,</li>
+<li>and use <code>0103</code> only to clarify the object model underneath that path.</li>
+</ul>
+<p>No deletion is required.</p>
+<h3 id="63-0100">6.3 <code>0100</code><a class="headerlink" href="#63-0100" title="Permanent link">&para;</a></h3>
+<p>Required amendment:</p>
+<ul>
+<li>keep <code>0100</code> as the owner of routed/public continuation algebra,</li>
+<li>keep the landed target-publication <code>attach_existing -&gt; Operation[T]</code> projection intact,</li>
+<li>keep current public continuation instance-scoped unless a separate proposal proves a need to widen it,</li>
+<li>and use <code>0103</code> only to clarify what semantic object that continuation refers to.</li>
+</ul>
+<p>No deletion is required.</p>
+<h3 id="64-0102">6.4 <code>0102</code><a class="headerlink" href="#64-0102" title="Permanent link">&para;</a></h3>
+<p>Required amendment:</p>
+<ul>
+<li>keep <code>0102</code> as the owner of canonical engine action vocabulary and manifest bridge semantics,</li>
+<li>do not read <code>0103</code> as retaking the repository-wide word <code>publish</code> from <code>0102</code>,</li>
+<li>when <code>0102</code> or integration docs mean the specific <code>0103</code> child action, spell it as target publication, volatile
+  target promotion, or another explicit scope term,</li>
+<li>and keep target-publication replay, currentness, and continuation semantics owned by <code>0103</code>, <code>0096</code>, and <code>0100</code>.</li>
+</ul>
+<h3 id="65-0104">6.5 <code>0104</code><a class="headerlink" href="#65-0104" title="Permanent link">&para;</a></h3>
+<p>Required amendment:</p>
+<ul>
+<li>keep <code>0104</code> as the owner of worker-local <code>realize_set</code>, cluster rollout, and source-retention closeout,</li>
+<li>allow <code>0104</code> to compose child target-publication subjects from <code>0103</code> when needed,</li>
+<li>and do not let <code>0103</code> expand into rollout barriers, cluster readiness, or source-retention semantics.</li>
+</ul>
+<h3 id="66-0087">6.6 <code>0087</code><a class="headerlink" href="#66-0087" title="Permanent link">&para;</a></h3>
+<p>Recommended amendment:</p>
+<ul>
+<li>add a cross-link from target publication tokens and publication barriers to <code>0103</code>,</li>
+<li>keep <code>0087</code> authoritative for artifact value model and publication unit,</li>
+<li>do not move publication workflow truth into <code>0087</code>.</li>
+</ul>
+<h1 id="proto-and-sdk-implications">Proto and SDK Implications<a class="headerlink" href="#proto-and-sdk-implications" title="Permanent link">&para;</a></h1>
+<p>This design does not introduce a new public continuation family.
+It also does not require an immediate <code>OperationRef</code> schema change.</p>
+<p>Implications:</p>
+<ul>
+<li>current SDK <code>publish_replica_operation()</code> may remain additive,</li>
+<li>current <code>StartPublishTargetReplica</code> may remain additive,</li>
+<li>both should be interpreted as <code>local_ephemeral</code> publication with current-instance dependency-ready semantics,</li>
+<li>current <code>BindingCurrentValuePublicationScope</code> is the ingress credential scope,
+  and must be interpreted as request-local credential material rather than as
+  the canonical long-term publication subject schema,</li>
+<li>current <code>OperationRef</code> remains publication-instance scoped,</li>
+<li>and daemon-side public-operation admission must resolve <code>publication_id</code> back to publication instance, target-domain
+  currentness, and lifecycle generation before it grants attach, wait, or status semantics.</li>
+</ul>
+<p>Future implementation work should ensure:</p>
+<ul>
+<li>internal subject matching is derived from canonical target-domain identity and lowered through
+  <code>WorkflowCompanionRef.currentness_key</code> rather than from <code>artifact_id</code> or a fresh ad hoc request string alone,</li>
+<li>same-subject rebinding and fail-closed attach are carried by <code>LifecycleEpochs.subject_generation</code> rather than by a
+  parallel publication-private owner-fence id,</li>
+<li><code>owner_pid</code> may remain a local observation during migration, but it must not become the canonical semantic identity of
+  a target domain,</li>
+<li>idempotency, when requested, is derived from stable target-domain identity plus stable action inputs plus binding
+  generation:</li>
+<li>retries with the same generation may join,</li>
+<li>same-subject rebinding must fork,</li>
+<li>operation-scoped observation never becomes a substitute for publication truth,</li>
+<li>and any additive subject diagnostics in continuation metadata remain exactly that: diagnostics, not a second public
+  routing DSL.</li>
+</ul>
+<p>Grounding reuse:</p>
+<ul>
+<li><code>MetadataGateway::begin_publish_for_context(...)</code> already provides a useful pattern for publish-context idempotency
+  against <code>ReplicaKey</code>.</li>
+<li>That pattern should be reused or generalized before introducing an unrelated second publish-idempotency contract.</li>
+</ul>
+<p>No persistent schema changes are required by this design itself.</p>
+<h1 id="schema-changes">Schema Changes<a class="headerlink" href="#schema-changes" title="Permanent link">&para;</a></h1>
+<p>None.</p>
+<p>This design intentionally avoids introducing a persistent per-blob publication table.
+If future <code>coordinated_slot</code> work needs durable truth, that must be proposed as a separate low-cardinality schema change
+scoped to explicit slot domains.</p>
+<h1 id="error-model">Error Model<a class="headerlink" href="#error-model" title="Permanent link">&para;</a></h1>
+<ul>
+<li>caller retries the same publish for the same currentness key while the same generation and current instance are still
+  active</li>
+<li><code>replay_attachable</code></li>
+<li>public projection should attach, not reopen</li>
+<li>caller retries the same publish for the same currentness key and same generation after current-instance terminal
+  completion</li>
+<li><code>replay_terminal</code></li>
+<li>current-instance terminal result may be reused</li>
+<li>caller targets the same stable subject but the same-subject generation was replaced or lost in <code>local_ephemeral</code></li>
+<li>explicit owner-loss or unavailable fail-closed result</li>
+<li>must not silently reattach to the replacement owner</li>
+<li>caller publishes the same artifact on a different daemon or target scope</li>
+<li>independent child publish</li>
+<li>must not be rejected merely because the artifact matches</li>
+<li>caller tries to observe a non-current older publication instance for a subject</li>
+<li><code>stale_current</code></li>
+<li>continuation metadata points at an instance that no longer proves the claimed currentness or generation relation</li>
+<li>failed precondition or unavailable depending on loss mode</li>
+<li>implementation tries to use a globally coordinated path for high-cardinality target publish by default</li>
+<li>rejected by design review; not a valid steady-state contract</li>
+</ul>
+<h1 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h1>
+<p>Minimum required dimensions:</p>
+<ul>
+<li><code>publication_mode</code></li>
+<li><code>publication_subject_kind</code></li>
+<li><code>publication_target_scope_kind</code></li>
+<li><code>publication_subject_match_result</code></li>
+<li><code>publication_currentness_result</code></li>
+<li><code>publication_binding_generation_relation</code></li>
+<li><code>publication_owner_observation_relation</code></li>
+<li><code>publication_instance_relation</code></li>
+<li><code>workflow_decision_class</code></li>
+<li><code>public_projection_kind</code></li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<table>
+<thead>
+<tr>
+<th>Interface</th>
+<th>Language</th>
+<th>Rule</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>PublicationSubjectKey</code></td>
+<td>C++ struct or logical type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PublicationOwnerFence</code></td>
+<td>C++ struct or logical type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PublicationInstanceId</code></td>
+<td>C++ struct or logical type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PublicationTargetScope</code></td>
+<td>C++ struct or logical type</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PublicationMode</code></td>
+<td>C++ enum class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>begin_publication_subject</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>evaluate_publication_subject</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>PUBLICATION_MODE_LOCAL_EPHEMERAL</code></td>
+<td>C++ constant or proto enum value</td>
+<td><code>ALL_CAPS</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="trade-offs-risks">Trade-offs &amp; Risks<a class="headerlink" href="#trade-offs-risks" title="Permanent link">&para;</a></h1>
+<ul>
+<li>Introducing <code>PublicationSubjectKey</code> and <code>PublicationInstanceId</code> adds another layer of naming.
+  That cost is justified because the repository is already paying the price of not separating artifact, replica, and
+  publish identities cleanly.</li>
+<li>Keeping <code>PublicationOwnerFence</code> as a logical relation over existing <code>0094</code> carriers may feel less self-contained than
+  inventing a standalone publication-private fence object.
+  That restraint is intentional because the repository already has one lifecycle non-reuse vocabulary and should not grow
+  a second one.</li>
+<li>Requiring an explicit cross-layer projection from subject currentness to lifecycle generation to instance to public
+  continuation is more work than letting each layer improvise its own string key.
+  That cost is justified because it prevents target publication from becoming another parallel control dialect.</li>
+<li>Keeping <code>local_ephemeral</code> as a first-class mode may feel less ambitious than claiming full distributed continuation
+  readiness today.
+  That restraint is intentional and better matches the actual recovery properties of volatile target memory.</li>
+<li>Keeping public continuation instance-scoped may feel less expressive than embedding subject identity directly into the
+  public operation contract.
+  That restraint is intentional because current code already has a working instance-scoped path and the daemon can
+  recover subject and fence truth fail-closed behind that surface.</li>
+<li>Keeping <code>coordinated_slot</code> as a future extension seam slows down "global attach for everything" stories.
+  That is the correct trade because the repository has repeatedly rejected high-cardinality Global Store hot paths and
+  should not add a second branch before the first one is deep enough.</li>
+<li>Narrowing <code>0103</code> to target publication only may feel smaller than owning repo-wide <code>publish</code>.
+  In practice it makes the module deeper and removes one of the repository's most persistent cross-document ambiguities.</li>
+</ul>
+<h1 id="compatibility-acceptance-criteria">Compatibility &amp; Acceptance Criteria<a class="headerlink" href="#compatibility-acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>Acceptance criteria:</p>
+<ul>
+<li>the same artifact may be published concurrently into multiple distinct target-publication domains without false
+  conflict,</li>
+<li>publish replay, attach, and stale-current decisions are scoped by publication currentness key plus generation plus
+  instance relation rather than by artifact id,</li>
+<li><code>0103</code> is realized as a composition over existing workflow and lifecycle carriers rather than as a new parallel
+  identity or fence lattice,</li>
+<li>stable subject identity is not silently defined by owner-local observations even if current code still stores a
+  composite precursor during migration,</li>
+<li>same-subject replacement or loss fails closed for old continuations rather than being mistaken for the same attachable
+  owner,</li>
+<li>same-subject rebinding converges on lifecycle <code>subject_generation</code> and does not invent a second publication-private
+  rebinding carrier,</li>
+<li>current landed target-backed publish remains valid as <code>local_ephemeral</code> publication,</li>
+<li>same-current terminal reuse remains valid for the current instance while non-current historical replay is not
+  overclaimed,</li>
+<li><code>Operation[T]</code> remains the public continuation surface and does not become publication truth,</li>
+<li>public continuation remains instance-scoped with daemon-side currentness and generation validation,</li>
+<li>one explicit cross-layer projection exists between target-domain currentness, lifecycle subject anchor, lifecycle
+  generation, publication instance, and public continuation,</li>
+<li><code>0103</code> is interpreted as target-publication semantics only and not as repository-wide ownership of every use of
+  <code>publish</code>,</li>
+<li><code>0102</code> and <code>0104</code> continue to orchestrate multiple child publish actions without owning their continuation semantics,</li>
+<li>no new per-blob Global Store hot path is introduced by this design,</li>
+<li><code>0094</code>, <code>0096</code>, <code>0100</code>, <code>0102</code>, and <code>0104</code> are amended by narrowing or clarifying ownership rather than deleting
+  them,</li>
+<li>idempotency aligns with stable target-domain identity plus binding generation instead of ad hoc retry-local ids,</li>
+<li>a future coordinated publish mode is allowed only through separate low-cardinality closeout with explicit truth
+  ownership.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>0055</code> for <code>Operation[T]</code>, deterministic idempotency guidance, and <code>ReplicaKey</code> versus operation identity.</li>
+<li><code>0056</code> for plan/runtime orchestration boundaries.</li>
+<li><code>0078</code> for <code>SelectionIdentity</code> and resolved selection semantics.</li>
+<li><code>0087</code> for artifact value model, publication units, and target-backed runtime grounding.</li>
+<li><code>0092</code> for repository-wide semantic kernels and layering between selection, lifecycle, truth, and authority.</li>
+<li><code>0093</code> for backing truth and <code>ResolvedSourceCapability</code>.</li>
+<li><code>0094</code> for lifecycle kernel boundaries and subject-vs-fence separation patterns.</li>
+<li><code>0096</code> for workflow-semantic publish algebra.</li>
+<li><code>0100</code> for public continuation algebra.</li>
+<li><code>0102</code> for canonical action vocabulary and multi-target orchestration layering.</li>
+<li><code>0104</code> for worker-local realization and cluster rollout layering above target publication.</li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

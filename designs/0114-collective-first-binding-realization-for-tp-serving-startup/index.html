@@ -1,0 +1,3228 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0114-collective-first-binding-realization-for-tp-serving-startup/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Collective-First Binding Realization for TP Serving Startup - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Collective-First Binding Realization for TP Serving Startup
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Define how <code>Binding.realize_from(...)</code> should converge to a
+<code>collective-first</code> TP serving-startup path without introducing a second
+execution stack.</p>
+<p>This design does <strong>not</strong> replace <code>0107</code> through <code>0112</code>.
+It closes one remaining mismatch inside their shared trunk:</p>
+<ul>
+<li><code>BindingRealizationPlan</code> is already the semantic ingress,</li>
+<li><code>RepresentationTransformContract</code> and <code>RepresentationWorkPlan</code> are already
+  the semantic and execution-core abstractions,</li>
+<li><code>ExecutionStrategyPlan</code> is already the strategy seam,</li>
+<li><code>IntoTargetLayout</code> and <code>MaterializationFacade</code> are already the shared target
+  execution substrate,</li>
+<li>but <code>binding.realize_from(...)</code> still lowers too much of the request into a
+  byte-range compatibility map and then treats that map as the de facto primary
+  execution path.</li>
+</ul>
+<p>The new policy is:</p>
+<ul>
+<li>TP shared-source startup should default to <strong>collective-first mixed
+  execution</strong>, not to <code>pure collective or fail</code>;</li>
+<li><code>ByteRangeMap</code> remains the canonical fallback and explainability surface, but
+  it must stop acting as the hidden primary execution graph for
+  <code>binding.realize_from(...)</code>;</li>
+<li>a binding-hosted target byte space may still be informally described as a
+  "target arena", but it remains a binding-plane local current value, not an
+  artifact-plane replica until publish/closeout succeeds;</li>
+<li>strict <code>pure collective</code> remains supported, but only as an explicit
+  execution-scoped mode with fail-fast semantics.</li>
+</ul>
+<p>The intended steady state is:</p>
+<ol>
+<li><code>BindingRealizationPlan</code> stays the public semantic input.</li>
+<li>TensorCast lowers it into one shared <code>RepresentationWorkPlan</code>.</li>
+<li>Strategy selection derives explicit execution lanes from that work plan:</li>
+<li>collective lane,</li>
+<li>local typed lane for pad/fill-like work,</li>
+<li>deferred typed lane for typed work that is not yet admitted to a preferred
+     executor,</li>
+<li>and true generic residual fallback.</li>
+<li><code>MaterializationFacade</code> executes those lanes through the existing shared
+   target substrate.</li>
+<li>Diagnostics surface the lane split explicitly so downstream operators do not
+   have to infer it from side effects or logs.</li>
+</ol>
+<p>This design is an architecture correction, not a new long-term owner for the
+shared abstractions it touches:</p>
+<ul>
+<li><code>0110</code> remains the owner of the shared semantic core and typed work inventory,</li>
+<li><code>0108</code> remains the owner of lane planning and mixed-execution strategy,</li>
+<li><code>0109</code> remains the owner of the owner-file collective executor,</li>
+<li><code>0113</code> remains the owner of the cross-design closure constraints, capability
+  and version handoff, and delete-gate invariants for the residual Example TP Model
+  work,</li>
+<li>and the closure evidence for this path now lives directly in this design plus
+  <code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code>.</li>
+</ul>
+<h1 id="target-state-alignment-with-0121">Target-State Alignment With <code>0121</code><a class="headerlink" href="#target-state-alignment-with-0121" title="Permanent link">&para;</a></h1>
+<p><code>0114</code> remains the evidence and design record for collective-first binding
+startup. Its long-term owner is the <code>0121</code> target-set realization model.</p>
+<p>The target interpretation is:</p>
+<ul>
+<li>TP startup is not a separate TP loader;</li>
+<li>collective-first behavior is a realization strategy over a target set;</li>
+<li>each TP member has a member-local target plan, layout, device facts, and
+  runtime profile;</li>
+<li>group barriers, staged values, and per-member diagnostics are lifecycle and
+  report facts of the shared realization plan.</li>
+</ul>
+<h2 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h2>
+<p><code>0114</code> is now closed at its owner boundary.</p>
+<p>What this design needed from the live system is now present:</p>
+<ul>
+<li>downstream <code>vllm</code> <code>/weight_version</code> summary records
+  <code>source_bound_contract_version=4</code>,
+  <code>source_bound_contract_path=collective_first_v4</code>,
+  <code>execution_plan_kind=collective_first_mixed</code>,
+  <code>planner_version=source_bound_collective_first.v4</code>,
+  and the realized collective policy and executor facts,</li>
+<li>the mounted qwen2.5 TP4 packet is current rather than a stale <code>v3</code> or
+  generic-dominant sample,</li>
+<li><code>planned_collective_admitted_bytes</code> and
+  <code>actual_collective_committed_bytes</code> align at <code>16382928896</code>,</li>
+<li><code>actual_generic_backend_bytes=0</code>,</li>
+<li><code>dominant_executor=OwnerFileCollectiveExecutor</code>,</li>
+<li>and the same-binding serving path reaches <code>/health</code>, <code>/v1/models</code>, and
+  <code>/v1/completions</code>.</li>
+</ul>
+<p>The standalone <code>0114</code> plan is therefore retired. No separate "active total
+execution plan" document is still needed for this path family.</p>
+<h2 id="current-vs-target-flow">Current vs Target Flow<a class="headerlink" href="#current-vs-target-flow" title="Permanent link">&para;</a></h2>
+<p>Current effective flow on the problematic TP path:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["BindingRealizationPlan"] --&gt; B["Transform Builder"]
+  B --&gt; C["RepresentationTransformContract"]
+  B --&gt; D["compatibility byte-range map"]
+  D --&gt; E["residual_fallback_map"]
+  E --&gt; F["mapped collective eligibility"]
+  F --&gt;|pad present| G["not eligible / generic dominant path"]</code></pre>
+<p>Target flow after this design:</p>
+<pre class="mermaid"><code>flowchart LR
+  A["BindingRealizationPlan"] --&gt; B["Transform Builder"]
+  B --&gt; C["RepresentationTransformContract"]
+  C --&gt; D["RepresentationWorkPlan"]
+  D --&gt; E["Strategy Plane"]
+  E --&gt; F["collective lane"]
+  E --&gt; G["local typed lane"]
+  E --&gt; H["deferred typed lane"]
+  E --&gt; I["generic residual lane"]
+  F --&gt; J["MaterializationFacade"]
+  G --&gt; J
+  H --&gt; J
+  I --&gt; J</code></pre>
+<p>The critical change is not a second executor tree.
+The critical change is to make the shared execution-core truth explicit before
+executor selection begins.</p>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Keep one execution trunk for <code>binding.realize_from(...)</code>.</li>
+<li>Make TP shared-source startup <code>collective-first</code> by default.</li>
+<li>Preserve <code>RepresentationTransformContract</code> /
+  <code>RepresentationWorkPlan</code> /
+  <code>ExecutionStrategyPlan</code> as the main architecture seam.</li>
+<li>Make the binding-hosted target byte space exact-size and coalesced with
+  respect to <code>IntoTargetLayout.total_size</code>.</li>
+<li>Ensure model tensors alias that target byte space once it is realized into
+  the binding.</li>
+<li>Keep <code>ByteRangeMap</code> as fallback and explainability truth, not as the hidden
+  main path.</li>
+<li>Make <code>pad</code>, <code>const fill</code>, and <code>scalar fill</code> first-class typed local work
+  instead of accidental collective blockers.</li>
+<li>Make strict <code>pure collective</code> fail fast before running an expensive generic
+  path.</li>
+<li>Surface planner and lane diagnostics explicitly through daemon responses and
+  SDK types.</li>
+<li>Keep downstream <code>vllm</code> integration on the common TensorCast runtime,
+  not on a vLLM-private fast path.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Redefine <code>ArtifactSelection</code>.</li>
+<li>Move topology context into <code>ArtifactSelection</code> or into binding identity.</li>
+<li>Reopen <code>0110</code> and define a second semantic-core abstraction.</li>
+<li>Replace <code>IntoTargetLayout</code> / <code>TargetLayoutGpuSink</code> with a profile-private
+  serving-only write substrate.</li>
+<li>Remove <code>ByteRangeMap</code> from the project.</li>
+<li>Require every TP startup request to execute on a <code>pure collective</code> executor.</li>
+<li>Introduce a second public API beside <code>Binding.realize_from(...)</code>.</li>
+<li>Create a model-family-specific or integration-specific execution fork.</li>
+</ul>
+<h1 id="prior-constraints-reviewed">Prior Constraints Reviewed<a class="headerlink" href="#prior-constraints-reviewed" title="Permanent link">&para;</a></h1>
+<h2 id="0084-binding-contract"><code>0084</code> binding contract<a class="headerlink" href="#0084-binding-contract" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>binding is a local stable target byte space,</li>
+<li>a <code>SealedBindingValue</code> is the immutable local current value,</li>
+<li>publish/key activation remain artifact-backed operations.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li>the "target arena" described by this design is only an informal name for the
+  binding-hosted target byte space;</li>
+<li>it must not be described or modeled as an artifact-plane replica before
+  publication.</li>
+</ul>
+<h2 id="0107-plane-separation"><code>0107</code> plane separation<a class="headerlink" href="#0107-plane-separation" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>ArtifactSelection</code> owns artifact/view/subset identity only,</li>
+<li>execution topology remains execution-scoped,</li>
+<li>rollout and executor choice must not be encoded into selection identity.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li>collective policy and strict-mode semantics remain execution-scoped,</li>
+<li>no new public field name may collapse artifact identity and topology intent
+  into one plane.</li>
+</ul>
+<h2 id="0108-strategy-plane"><code>0108</code> strategy plane<a class="headerlink" href="#0108-strategy-plane" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>ExecutionEnvironmentFacts</code>,</li>
+<li><code>ExecutionStrategyPlan</code>,</li>
+<li>mixed execution as the preferred long-term model,</li>
+<li>and the rule that execution must not implicitly widen to generic fallback
+  after a partial executor attempt.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li>the new design strengthens <code>0108</code> rather than replacing it;</li>
+<li>the missing piece is to make <code>binding.realize_from(...)</code> actually consume the
+  mixed-execution model instead of hiding behind a compatibility byte map.</li>
+</ul>
+<h2 id="0109-owner-file-collective"><code>0109</code> owner-file collective<a class="headerlink" href="#0109-owner-file-collective" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li>collective execution is evidence-driven,</li>
+<li>shared-source TP startup is the right target domain,</li>
+<li><code>ByteRangeMap</code> remains the canonical fallback and explainability surface.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li><code>0114</code> does not delete <code>ByteRangeMap</code>;</li>
+<li>it narrows it back to its intended role by removing it from the hidden main
+  lane for binding-native realization.</li>
+</ul>
+<h2 id="0110-semantic-core"><code>0110</code> semantic core<a class="headerlink" href="#0110-semantic-core" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>RepresentationTransformContract</code> is the common semantic truth,</li>
+<li>residual fallback coverage must remain explicit,</li>
+<li>executor-private candidates must not become the semantic contract.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li><code>0114</code> keeps <code>RepresentationTransformContract</code> and
+  <code>RepresentationWorkPlan</code> as the public/shared semantic and execution-core
+  truth;</li>
+<li>executor-private collective lowering remains a strategy-plane concern.</li>
+</ul>
+<h2 id="0112-binding-native-realization"><code>0112</code> binding-native realization<a class="headerlink" href="#0112-binding-native-realization" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>BindingRealizationPlan</code> remains the public work-item-list ingress,</li>
+<li>binding-native publication and same-binding realization stay on the mainline,</li>
+<li>downstream integrations should not route back through legacy tensor-publication
+  bridges.</li>
+</ul>
+<p>Applied here:</p>
+<ul>
+<li><code>0114</code> is not a second binding-native model;</li>
+<li>it is the convergence design for making that mainline truly
+  <code>collective-first</code>.</li>
+</ul>
+<h1 id="current-mismatch">Current Mismatch<a class="headerlink" href="#current-mismatch" title="Permanent link">&para;</a></h1>
+<p>Current <code>binding.realize_from(...)</code> behavior has five structural problems.</p>
+<h2 id="1-semantic-plan-and-byte-range-execution-are-conflated">1. Semantic plan and byte-range execution are conflated<a class="headerlink" href="#1-semantic-plan-and-byte-range-execution-are-conflated" title="Permanent link">&para;</a></h2>
+<p>Today the controller path around
+<code>representation_transform_builder::BuildRepresentationTransformResult</code>
+produces both:</p>
+<ul>
+<li>a semantic <code>RepresentationTransformContract</code>,</li>
+<li>and a <code>generic_fallback_map</code>.</li>
+</ul>
+<p>In practice, many copy-compatible bytes are inserted into that byte-range map,
+even when they already have typed semantic coverage.</p>
+<p>This makes the "fallback" map behave like a primary execution graph.</p>
+<h2 id="2-residual_fallback_map-is-misnamed-on-this-path">2. <code>residual_fallback_map</code> is misnamed on this path<a class="headerlink" href="#2-residual_fallback_map-is-misnamed-on-this-path" title="Permanent link">&para;</a></h2>
+<p>During execution-plan construction, the compatibility byte map is injected into
+<code>RepresentationWorkPlan.residual_fallback_map</code>.</p>
+<p>For <code>binding.realize_from(...)</code>, this means:</p>
+<ul>
+<li>the field name says "residual",</li>
+<li>but the field may represent most of the request's bytes,</li>
+<li>including the bytes that should have been carried by typed work items.</li>
+</ul>
+<p>That naming drift causes both implementation mistakes and operator confusion.</p>
+<h2 id="3-collective-eligibility-is-evaluated-against-the-wrong-thing">3. Collective eligibility is evaluated against the wrong thing<a class="headerlink" href="#3-collective-eligibility-is-evaluated-against-the-wrong-thing" title="Permanent link">&para;</a></h2>
+<p>Current mapped collective execution reads
+<code>work_plan.residual_fallback_map</code> and requires every segment to be <code>kData</code>.</p>
+<p>As a result:</p>
+<ul>
+<li><code>kPad</code> segments,</li>
+<li>or any other byte-range artifact that should have lived in a local typed lane,</li>
+</ul>
+<p>turn into a collective blocker for the whole request.</p>
+<h2 id="4-strict-collective-currently-fails-slow">4. Strict collective currently fails slow<a class="headerlink" href="#4-strict-collective-currently-fails-slow" title="Permanent link">&para;</a></h2>
+<p>In the current flow, a request may already run an expensive non-collective
+source-ordered byte-range path and only afterwards be rejected as
+<code>not_eligible</code> by a strict collective policy.</p>
+<p>That is the wrong product behavior.</p>
+<p>Strict policy must be decided before the expensive generic path runs.</p>
+<h2 id="5-diagnostics-are-too-compressed">5. Diagnostics are too compressed<a class="headerlink" href="#5-diagnostics-are-too-compressed" title="Permanent link">&para;</a></h2>
+<p><code>ExecutionDiagnostics</code> currently reports high-level outcome bits such as:</p>
+<ul>
+<li><code>collective_requested</code>,</li>
+<li><code>collective_used</code>,</li>
+<li><code>dominant_executor</code>,</li>
+<li><code>fallback_bytes</code>,</li>
+<li><code>residual_bytes</code>.</li>
+</ul>
+<p>Those fields are necessary but insufficient.</p>
+<p>They do not tell the operator:</p>
+<ul>
+<li>how many bytes were collective-capable,</li>
+<li>how many bytes were lowered into local pad/fill work,</li>
+<li>how many bytes remained true generic residual,</li>
+<li>or why bytes were rejected from collective lowering.</li>
+</ul>
+<h1 id="design-principles">Design Principles<a class="headerlink" href="#design-principles" title="Permanent link">&para;</a></h1>
+<h2 id="1-one-trunk-no-execution-fork">1. One trunk, no execution fork<a class="headerlink" href="#1-one-trunk-no-execution-fork" title="Permanent link">&para;</a></h2>
+<p><code>0114</code> must not create:</p>
+<ul>
+<li>a vLLM-private executor,</li>
+<li>a TP-only serving loader branch,</li>
+<li>or a second target-write substrate.</li>
+</ul>
+<p>Everything stays inside the shared TensorCast runtime trunk:</p>
+<p><code>BindingRealizationPlan</code> -&gt;
+<code>RepresentationTransformContract</code> -&gt;
+<code>RepresentationWorkPlan</code> -&gt;
+<code>ExecutionStrategyPlan</code> -&gt;
+<code>MaterializationFacade</code> -&gt;
+shared target sinks and transports.</p>
+<h2 id="2-collective-is-the-default-main-lane-not-the-only-lane">2. Collective is the default main lane, not the only lane<a class="headerlink" href="#2-collective-is-the-default-main-lane-not-the-only-lane" title="Permanent link">&para;</a></h2>
+<p>For TP shared-source startup, the default should be:</p>
+<ul>
+<li>collective-first,</li>
+<li>mixed execution allowed,</li>
+<li>pure collective optional and explicit.</li>
+</ul>
+<p>This is how TensorCast can be both high-performance and general.</p>
+<h2 id="3-every-byte-belongs-to-one-explicit-lane">3. Every byte belongs to one explicit lane<a class="headerlink" href="#3-every-byte-belongs-to-one-explicit-lane" title="Permanent link">&para;</a></h2>
+<p>For a realized binding target byte space, each target byte must belong to
+exactly one of:</p>
+<ul>
+<li>collective typed work,</li>
+<li>local typed work,</li>
+<li>deferred typed work,</li>
+<li>or generic residual fallback.</li>
+</ul>
+<p>No byte may be "implicitly re-derived later" by an executor.</p>
+<h2 id="4-explainability-must-survive-optimization">4. Explainability must survive optimization<a class="headerlink" href="#4-explainability-must-survive-optimization" title="Permanent link">&para;</a></h2>
+<p>The design must keep:</p>
+<ul>
+<li>exact coverage accounting,</li>
+<li>typed reject reasons,</li>
+<li>and stable diagnostics summaries,</li>
+</ul>
+<p>so that higher performance does not come at the cost of opaque behavior.</p>
+<h1 id="document-ownership">Document Ownership<a class="headerlink" href="#document-ownership" title="Permanent link">&para;</a></h1>
+<p><code>0114</code> is intentionally narrow in ownership.</p>
+<p>It defines how binding-native TP startup must consume the shared strategy trunk
+correctly.</p>
+<p>It does not become the repository-wide owner of:</p>
+<ul>
+<li><code>RepresentationTransformContract</code>,</li>
+<li><code>RepresentationWorkPlan</code>,</li>
+<li><code>ExecutionStrategyPlan</code>,</li>
+<li>or <code>OwnerFileCollectiveExecutor</code>.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>if <code>0114</code> discovers that those shared abstractions need to be tightened for
+  the whole repository, the accepted owner designs (<code>0110</code>, <code>0108</code>, <code>0109</code>)
+  should be revised accordingly rather than leaving <code>0114</code> as a path-scoped
+  shadow owner.</li>
+</ul>
+<h1 id="architecture-interfaces">Architecture &amp; Interfaces<a class="headerlink" href="#architecture-interfaces" title="Permanent link">&para;</a></h1>
+<h2 id="planner-inputs-and-performance-objective">Planner Inputs And Performance Objective<a class="headerlink" href="#planner-inputs-and-performance-objective" title="Permanent link">&para;</a></h2>
+<p>For this path, the planner must treat the following inputs as authoritative:</p>
+<ul>
+<li>source artifact/view metadata</li>
+<li>target <code>IntoTargetLayout</code></li>
+<li>target tensor schema and logical topology</li>
+<li>source layout metadata</li>
+<li>execution topology context</li>
+<li>collective policy</li>
+<li>typed work plan items</li>
+<li>lane allocation over typed work plan items</li>
+<li>residual byte-range fallback map</li>
+</ul>
+<p>The planner objective is not "minimize copy count" in isolation.
+It is to minimize end-to-end startup critical path under the actual shared-source
+TP environment.</p>
+<p>The primary cost dimensions are:</p>
+<ul>
+<li>unique disk bytes</li>
+<li>owner skew</li>
+<li>GPU peer transfer bytes</li>
+<li>peak temporary bytes</li>
+<li>target write amplification</li>
+<li>control-plane assembly cost</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>a strategy choice that adds cheap GPU peer traffic in order to reduce unique
+  shared-disk reads is allowed and often preferred;</li>
+<li>the planner must optimize total startup latency and bounded peak memory, not
+  just per-rank local read simplicity.</li>
+</ul>
+<h2 id="shared-abstractions-that-stay">Shared Abstractions That Stay<a class="headerlink" href="#shared-abstractions-that-stay" title="Permanent link">&para;</a></h2>
+<p>The following abstractions remain authoritative and shared:</p>
+<ul>
+<li><code>ArtifactSelection</code></li>
+<li>artifact/view/subset identity only.</li>
+<li><code>ByteSpaceRef</code></li>
+<li>source byte-space identity.</li>
+<li><code>BindingRealizationPlan</code></li>
+<li>public semantic ingress for binding-native realization.</li>
+<li><code>RepresentationTransformContract</code></li>
+<li>semantic truth after normalization.</li>
+<li><code>RepresentationWorkPlan</code></li>
+<li>shared execution-core truth.</li>
+<li><code>ExecutionStrategyPlan</code></li>
+<li>strategy-plane output.</li>
+<li><code>IntoTargetLayout</code></li>
+<li>shared target-byte-space layout.</li>
+<li><code>MaterializationFacade</code></li>
+<li>execution owner.</li>
+<li><code>ByteRangeMap</code></li>
+<li>fallback and explainability surface.</li>
+</ul>
+<p><code>0114</code> does not add a second semantic core and does not bypass these seams.</p>
+<h2 id="binding-hosted-target-byte-space">Binding-Hosted Target Byte Space<a class="headerlink" href="#binding-hosted-target-byte-space" title="Permanent link">&para;</a></h2>
+<p>For same-binding TP startup, the target object is:</p>
+<ul>
+<li>the binding-hosted target byte space described by <code>IntoTargetLayout</code>,</li>
+<li>sized exactly to <code>IntoTargetLayout.total_size</code>,</li>
+<li>and backed by one local current value on one device.</li>
+</ul>
+<p>Informally this may be called a "target arena", but it remains a binding-plane
+object, not an artifact-plane replica.</p>
+<p>Normative rules:</p>
+<ol>
+<li>the target byte space size must be deterministic from target layout
+   resolution;</li>
+<li>runtime tensor aliases must refer into that byte space rather than causing a
+   second model-sized steady-state allocation;</li>
+<li>the design does not require every transient implementation stage to avoid
+   temporary memory, but it does require the binding-hosted target byte space to
+   be the final steady-state serving host.</li>
+</ol>
+<h2 id="execution-core-normalization">Execution-Core Normalization<a class="headerlink" href="#execution-core-normalization" title="Permanent link">&para;</a></h2>
+<p><code>RepresentationWorkPlan</code> remains the execution-core contract.</p>
+<p>The new rule is:</p>
+<ul>
+<li>typed work items are the primary execution intent,</li>
+<li><code>residual_fallback_map</code> is only for bytes that truly remain generic after
+  lowering.</li>
+</ul>
+<p>Normative derivation rule:</p>
+<ul>
+<li><code>pad fill</code> is derived during work-plan construction from the coverage-closure
+  gaps implied by the normalized semantic contract plus the target layout;</li>
+<li>it is part of work-plan identity and plan diagnostics,</li>
+<li>but it does not widen <code>RepresentationTransformContract</code> or
+  <code>representation_contract_hash</code> into executor-shaped padding artifacts.</li>
+</ul>
+<h3 id="required-work-item-set">Required work-item set<a class="headerlink" href="#required-work-item-set" title="Permanent link">&para;</a></h3>
+<p>The common work-item vocabulary for this path must cover:</p>
+<ul>
+<li>tensor copy</li>
+<li>concat assemble</li>
+<li>scalar broadcast fill</li>
+<li>const fill</li>
+<li>pad fill</li>
+<li>residual byte-range</li>
+</ul>
+<p><code>pad fill</code> is new at the execution-core level.</p>
+<p>Rationale:</p>
+<ul>
+<li><code>kPad</code> today already has deterministic semantics: zero-fill target bytes;</li>
+<li>keeping it only inside <code>ByteRangeMap</code> makes it invisible to the typed planner
+  and wrongly turns it into a collective blocker;</li>
+<li>promoting it to an explicit local typed work item keeps the semantics inside
+  the shared execution core rather than inside executor-specific side logic.</li>
+</ul>
+<h3 id="coverage-rule">Coverage rule<a class="headerlink" href="#coverage-rule" title="Permanent link">&para;</a></h3>
+<p>For this path:</p>
+<ol>
+<li>every byte covered by a typed work item must be absent from
+   <code>residual_fallback_map</code>;</li>
+<li><code>residual_fallback_map</code> may only cover bytes with no typed execution
+   equivalent in the current lowering phase;</li>
+<li>duplicate coverage between typed work and residual byte-range fallback is an
+   invariant violation.</li>
+</ol>
+<h3 id="lane-assignment-rules">Lane assignment rules<a class="headerlink" href="#lane-assignment-rules" title="Permanent link">&para;</a></h3>
+<p>Default lowering intent for each execution-core work item is:</p>
+<table>
+<thead>
+<tr>
+<th>Work item kind</th>
+<th>Default lane</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kTensorCopy</code> replicated</td>
+<td>collective</td>
+<td>primary TP startup lane</td>
+</tr>
+<tr>
+<td><code>kTensorCopy</code> dim0</td>
+<td>collective</td>
+<td>primary TP startup lane</td>
+</tr>
+<tr>
+<td><code>kTensorCopy</code> dim1</td>
+<td>collective when admitted, else deferred typed</td>
+<td>must not silently become true residual</td>
+</tr>
+<tr>
+<td><code>kConcatAssemble</code></td>
+<td>collective when admitted, else deferred typed</td>
+<td>no implicit widening</td>
+</tr>
+<tr>
+<td><code>kConstFill</code></td>
+<td>local typed</td>
+<td>must not block collective bytes</td>
+</tr>
+<tr>
+<td><code>kScalarBroadcastFill</code></td>
+<td>local typed</td>
+<td>must not block collective bytes</td>
+</tr>
+<tr>
+<td><code>pad fill</code></td>
+<td>local typed</td>
+<td>zero-fill semantics</td>
+</tr>
+<tr>
+<td><code>kResidualByteRange</code></td>
+<td>generic residual</td>
+<td>true fallback only</td>
+</tr>
+</tbody>
+</table>
+<p>Normative rule:</p>
+<ul>
+<li>if a typed work item is not yet admitted to the collective lane, the planner
+  must record that as an explicit typed reject reason;</li>
+<li>it must not silently erase the typed work identity and only expose the final
+  generic byte-range effect;</li>
+<li>typed work may later lower into a generic executor backend as an
+  executor-private implementation detail, but that does not make it true
+  <code>residual_fallback_map</code> coverage in the shared contracts.</li>
+</ul>
+<h3 id="transitional-note">Transitional note<a class="headerlink" href="#transitional-note" title="Permanent link">&para;</a></h3>
+<p>The current controller field
+<code>BuildRepresentationTransformResult.generic_fallback_map</code> may remain temporarily
+for rollout compatibility, but it must be demoted to an explicitly transitional
+bridge field and must not continue to define the meaning of
+<code>RepresentationWorkPlan.residual_fallback_map</code>.</p>
+<p>Its long-term replacement is:</p>
+<ul>
+<li>typed work items for collective/local executable lanes plus non-admitted typed
+  accounting,</li>
+<li>plus true generic residual fallback only.</li>
+</ul>
+<h2 id="strategy-plane-lowering">Strategy-Plane Lowering<a class="headerlink" href="#strategy-plane-lowering" title="Permanent link">&para;</a></h2>
+<p><code>ExecutionStrategyPlan</code> remains the strategy owner.</p>
+<p>Steady state planning still admits four semantic categories, but the first
+contract landing does not need to expose all four as executor-visible public
+lanes.</p>
+<p>For collective-first TP startup, the planner must at least derive:</p>
+<ul>
+<li><code>collective lane</code></li>
+<li>collective-capable typed items</li>
+<li><code>local typed lane</code></li>
+<li>pad/fill and other cheap local typed work</li>
+<li><code>generic residual lane</code></li>
+<li>true <code>ByteRangeMap</code> residual fallback</li>
+<li><code>non-admitted typed accounting</code></li>
+<li>typed items that remain typed in shared planning even when a preferred
+    executor cannot yet admit them</li>
+</ul>
+<p>No executor may reinterpret a generic lane as primary semantic truth when typed
+items already exist.</p>
+<h3 id="collective-lane">Collective lane<a class="headerlink" href="#collective-lane" title="Permanent link">&para;</a></h3>
+<p>This lane is the default main lane for TP shared-source startup.</p>
+<p>Its target set includes:</p>
+<ul>
+<li>replicated tensor copy</li>
+<li>dim0 partitioned tensor copy</li>
+<li>dim1 partitioned tensor copy</li>
+<li>concat work once its execution form is admitted</li>
+</ul>
+<p>Collective lane eligibility must be computed from typed work items and topology
+facts, not from the historical shape of <code>residual_fallback_map</code>.</p>
+<p>The lane may still use byte-range internals for executor implementation, but
+those internals must be derived from lane-local typed work rather than treated
+as the public/shared semantic truth.</p>
+<h3 id="local-typed-lane">Local typed lane<a class="headerlink" href="#local-typed-lane" title="Permanent link">&para;</a></h3>
+<p>This lane is for:</p>
+<ul>
+<li>pad fill</li>
+<li>const fill</li>
+<li>scalar fill</li>
+<li>and any future cheap local typed work that does not justify generic byte-range
+  execution</li>
+</ul>
+<p>This lane is still part of the same execution plan.
+It is not a fallback in the product sense.</p>
+<h3 id="deferred-typed-non-admitted-typed-accounting">Deferred typed / non-admitted typed accounting<a class="headerlink" href="#deferred-typed-non-admitted-typed-accounting" title="Permanent link">&para;</a></h3>
+<p>This category is for typed work that the shared planner still understands
+semantically, but that a preferred executor does not yet admit directly.</p>
+<p>Normative rules:</p>
+<ul>
+<li>these bytes remain typed in shared planning and diagnostics,</li>
+<li>they may later lower into a generic executor backend as an executor-private
+  implementation detail,</li>
+<li>but they do not become true generic residual in the shared contracts.</li>
+<li>the first source-bound contract landing may surface them as a planner-owned
+  accounting bucket rather than as a fourth executor-visible public lane, so
+  long as typed identity is preserved.</li>
+</ul>
+<h3 id="generic-residual-lane">Generic residual lane<a class="headerlink" href="#generic-residual-lane" title="Permanent link">&para;</a></h3>
+<p>This lane is only for bytes that remain unsupported by the current typed
+lowering.</p>
+<p>It keeps <code>ByteRangeMap</code> as:</p>
+<ul>
+<li>the canonical fallback encoding,</li>
+<li>the explainability surface,</li>
+<li>and the final safety net.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>generic residual bytes must be explainable as the set difference between the
+  target byte space and the union of admitted collective/local/deferred typed
+  work.</li>
+</ul>
+<h2 id="policy-model">Policy Model<a class="headerlink" href="#policy-model" title="Permanent link">&para;</a></h2>
+<p>On the current public wire, the collective policy model should converge to
+three stable meanings:</p>
+<ul>
+<li>existing <code>ALLOW_NOT_ELIGIBLE_FALLBACK</code></li>
+<li>means collective-first mixed execution</li>
+<li>collective is the preferred main lane, but local typed and true residual
+    execution remain admitted when required</li>
+<li>existing <code>REQUIRE_COLLECTIVE</code></li>
+<li>means strict pure collective</li>
+<li>request must be fully consumable by the admitted collective execution shape</li>
+<li>existing <code>DISABLE_COLLECTIVE</code></li>
+<li>remains explicit debug or regression mode</li>
+</ul>
+<p>Normative rollout rules:</p>
+<ul>
+<li><code>UNSPECIFIED</code> must not silently change meaning during mixed-version rollout;</li>
+<li>this design corrects the semantics of the shipped policy family before any
+  public rename cleanup is attempted;</li>
+<li>a later API cleanup may rename these modes to
+  <code>collective_first</code> / <code>require_pure_collective</code> / <code>disable_collective</code>, but
+  that rename is not part of this design's required cutover.</li>
+</ul>
+<h2 id="interface-changes-required">Interface Changes Required<a class="headerlink" href="#interface-changes-required" title="Permanent link">&para;</a></h2>
+<p>This design intentionally keeps the main abstractions, but it still requires
+explicit interface additions and clarifications.</p>
+<h3 id="public-typed-diagnostics">Public / typed diagnostics<a class="headerlink" href="#public-typed-diagnostics" title="Permanent link">&para;</a></h3>
+<p><code>ExecutionDiagnostics</code> must not become the permanent catch-all owner of both
+source-bound planner state and actual execution state.</p>
+<p>Long-term rule:</p>
+<ul>
+<li>cross-path and actual execution summary facts may remain on
+  <code>ExecutionDiagnostics</code>,</li>
+<li>but source-bound planner, lane, and reject-bucket detail should live in a
+  source-bound-scoped child diagnostics contract such as
+  <code>SourceBoundPlanDiagnostics</code>.</li>
+</ul>
+<p>During rollout, additive fields may temporarily live on <code>ExecutionDiagnostics</code>,
+but the target architecture is a scoped diagnostics model.</p>
+<p>Required surfaced facts for the source-bound path include:</p>
+<ul>
+<li>planner surface</li>
+<li>execution-plan kind</li>
+<li>planned byte counts per lane</li>
+<li>typed reject-reason buckets</li>
+<li>planner version and plan hash</li>
+<li>planner cost estimates that materially affect executor choice</li>
+<li>actual execution surface</li>
+<li>actual byte counts by backend family</li>
+<li>dominant executor</li>
+<li>direct-write support</li>
+<li>hash and identity facts on the realized path</li>
+</ul>
+<p>These additions are additive and must not remove existing fields during rollout.</p>
+<h3 id="controller-internal-output">Controller internal output<a class="headerlink" href="#controller-internal-output" title="Permanent link">&para;</a></h3>
+<p><code>BuildRepresentationTransformResult</code> must stop implying that
+<code>generic_fallback_map</code> is the stable primary execution artifact for this path.</p>
+<p>The controller output must make the following distinction explicit:</p>
+<ul>
+<li>typed work admitted to execution-core plan</li>
+<li>local typed work</li>
+<li>deferred typed work</li>
+<li>true generic residual fallback</li>
+</ul>
+<p>Whether this happens by renaming, by additive fields, or by a new transitional
+wrapper type is an implementation choice, but the semantic distinction is
+mandatory.</p>
+<h3 id="runtime-strategy-input">Runtime strategy input<a class="headerlink" href="#runtime-strategy-input" title="Permanent link">&para;</a></h3>
+<p><code>ExecutionStrategyPlan</code> must gain enough structured input to derive lanes from
+typed work rather than reverse-engineering them from residual bytes.</p>
+<p>This may be additive to existing fields, but the final semantics must be:</p>
+<ul>
+<li>lane selection is typed and explicit,</li>
+<li>typed work rejected by a preferred executor remains typed in shared planning,</li>
+<li>residual fallback remains residual.</li>
+</ul>
+<h3 id="runtime-config-binding">Runtime config binding<a class="headerlink" href="#runtime-config-binding" title="Permanent link">&para;</a></h3>
+<p>This path must remain bound to the unified runtime configuration model.</p>
+<p>Normative rules:</p>
+<ul>
+<li>source-bound binding startup obeys the same
+  <code>engine.materialization_strategy</code> controls as the ordinary path,</li>
+<li>collective budgets, mixed-execution enablement, and shared-source proof stay
+  under the existing typed config family,</li>
+<li>and <code>0114</code> must not introduce a binding-path-private environment toggle or a
+  second strategy-policy namespace.</li>
+</ul>
+<h2 id="failure-semantics">Failure Semantics<a class="headerlink" href="#failure-semantics" title="Permanent link">&para;</a></h2>
+<h3 id="default-collective-first-mode">Default collective-first mode<a class="headerlink" href="#default-collective-first-mode" title="Permanent link">&para;</a></h3>
+<p>The request may still execute successfully when:</p>
+<ul>
+<li>collective handles the dominant typed bytes,</li>
+<li>local typed work handles pad/fill bytes,</li>
+<li>deferred typed work preserves typed identity for work not yet admitted to a
+  preferred executor,</li>
+<li>generic residual handles the remaining bytes with no typed equivalent.</li>
+</ul>
+<p>This is not "fallback" in the operator-facing sense.
+This is the intended execution plan.</p>
+<h3 id="strict-pure-collective-mode">Strict pure-collective mode<a class="headerlink" href="#strict-pure-collective-mode" title="Permanent link">&para;</a></h3>
+<p>If the request is not eligible for the strict mode:</p>
+<ul>
+<li>the daemon must reject it before running the expensive generic path,</li>
+<li>and must return typed reject reasons.</li>
+</ul>
+<p>Failing only after a source-ordered generic execution has completed is
+forbidden.</p>
+<h2 id="observability">Observability<a class="headerlink" href="#observability" title="Permanent link">&para;</a></h2>
+<p>The observability model must distinguish planned lane truth from actual
+execution truth.</p>
+<p>Required surfaced facts include:</p>
+<ul>
+<li>planner / lane facts</li>
+<li><code>execution_plan_kind</code></li>
+<li><code>planned_collective_candidate_bytes</code></li>
+<li><code>planned_collective_admitted_bytes</code></li>
+<li><code>planned_local_typed_bytes</code></li>
+<li><code>planned_non_admitted_typed_bytes</code></li>
+<li><code>planned_generic_residual_bytes</code></li>
+<li><code>collective_lowered_bytes</code></li>
+<li><code>planner_reject_reason_buckets</code></li>
+<li><code>planner_version</code></li>
+<li><code>plan_hash</code></li>
+<li>actual execution facts</li>
+<li><code>actual_collective_committed_bytes</code></li>
+<li><code>actual_local_typed_bytes</code></li>
+<li><code>actual_generic_backend_bytes</code></li>
+<li><code>dominant_executor</code></li>
+<li><code>direct_write_supported</code></li>
+</ul>
+<p>Existing controller-side compatibility counters such as:</p>
+<ul>
+<li><code>compatible_candidates</code></li>
+<li><code>compatible_bytes</code></li>
+<li><code>concat_candidates</code></li>
+<li><code>rejected_mixed_src_or_dim</code></li>
+<li><code>rejected_non_contiguous</code></li>
+<li><code>rejected_unsupported_distribution</code></li>
+</ul>
+<p>must no longer remain log-only on this path.</p>
+<p>They must be exposed through typed daemon diagnostics so downstream integrations
+and operators can distinguish:</p>
+<ul>
+<li>collective planner limitations,</li>
+<li>target-layout pad/fill effects,</li>
+<li>and true generic residual.</li>
+</ul>
+<h2 id="debugging-contract">Debugging Contract<a class="headerlink" href="#debugging-contract" title="Permanent link">&para;</a></h2>
+<p>The implementation must make the following questions answerable without source
+inspection:</p>
+<ol>
+<li>Did the request enter <code>collective-first</code> or strict <code>pure collective</code> mode?</li>
+<li>How many bytes were eligible for collective lowering?</li>
+<li>How many bytes actually committed through collective execution?</li>
+<li>How many bytes were executed as local pad work?</li>
+<li>How many bytes were executed as local fill work?</li>
+<li>How many bytes remained in deferred typed coverage?</li>
+<li>How many bytes remained true generic residual?</li>
+<li>Why were bytes rejected from collective lowering?</li>
+<li>Did strict mode fail before expensive generic execution began?</li>
+</ol>
+<p>This contract must hold across:</p>
+<ul>
+<li>daemon structured diagnostics,</li>
+<li>SDK typed diagnostics,</li>
+<li>downstream integration summaries.</li>
+</ul>
+<h1 id="example-tp-model-as-the-motivating-example">Example TP Model As The Motivating Example<a class="headerlink" href="#example-tp-model-as-the-motivating-example" title="Permanent link">&para;</a></h1>
+<p>Example TP Model is not a special one-off exception.
+It is simply a representative example of a TP startup request that exercises the
+current mismatch.</p>
+<p>What happens today:</p>
+<ul>
+<li>the source-bound path uses <code>subset(...).view(slices=...)</code>-style narrowing;</li>
+<li>target byte-space composition introduces pad coverage for holes in the target
+  byte space;</li>
+<li>controller lowering encodes large amounts of copy-compatible work into a
+  compatibility byte-range map;</li>
+<li>mapped collective reads <code>residual_fallback_map</code> as if it were the primary
+  execution graph;</li>
+<li>the presence of <code>kPad</code> then makes the whole request appear collectively
+  ineligible.</li>
+</ul>
+<p>What should happen instead:</p>
+<ul>
+<li>the bulk TP shard copy bytes become collective typed work;</li>
+<li>pad bytes become explicit local <code>pad fill</code>;</li>
+<li>manifest or other typed fill bytes become explicit local fill work;</li>
+<li>typed but not-yet-admitted items remain typed in shared planning and
+  diagnostics;</li>
+<li>only truly unsupported leftovers remain in generic residual fallback.</li>
+</ul>
+<p>This is the intended generic solution for TP startup, not a Example TP Model-only
+special case.</p>
+<h1 id="module-coordination">Module Coordination<a class="headerlink" href="#module-coordination" title="Permanent link">&para;</a></h1>
+<h2 id="sdk-api-layer">SDK / API layer<a class="headerlink" href="#sdk-api-layer" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>Binding.realize_from(...)</code> remains the public ingress.</li>
+</ul>
+<p>Changed:</p>
+<ul>
+<li>collective policy semantics are clarified,</li>
+<li>diagnostics become additive,</li>
+<li>no new public realization API is introduced.</li>
+</ul>
+<h2 id="controller-transform-builder-layer">Controller / transform-builder layer<a class="headerlink" href="#controller-transform-builder-layer" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>BindingRealizationPlan -&gt; RepresentationTransformContract</code> normalization.</li>
+</ul>
+<p>Changed:</p>
+<ul>
+<li>compatible typed work must stop being encoded as primary
+  <code>generic_fallback_map</code> bytes,</li>
+<li><code>pad fill</code> becomes explicit typed work,</li>
+<li>controller compatibility stats become typed outputs instead of log-only hints.</li>
+</ul>
+<h2 id="strategy-runtime-layer">Strategy / runtime layer<a class="headerlink" href="#strategy-runtime-layer" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>ExecutionStrategyPlan</code> owns executor choice.</li>
+</ul>
+<p>Changed:</p>
+<ul>
+<li>collective lane is derived from typed work items,</li>
+<li>local typed lane is explicit,</li>
+<li>non-admitted typed accounting is explicit,</li>
+<li>generic residual lane is kept narrow and true to its name,</li>
+<li>strict mode rejects pre-execution when ineligible.</li>
+</ul>
+<h2 id="dataplane-executor-layer">Dataplane / executor layer<a class="headerlink" href="#dataplane-executor-layer" title="Permanent link">&para;</a></h2>
+<p>Kept:</p>
+<ul>
+<li><code>IntoTargetLayout</code>,</li>
+<li><code>TargetLayoutGpuSink</code>,</li>
+<li>shared direct-write/pump infrastructure.</li>
+</ul>
+<p>Changed:</p>
+<ul>
+<li>collective executor must stop assuming that the only meaningful input is the
+  generic residual byte-range map,</li>
+<li>pad/fill handling must no longer be modeled as "collective blocker for the
+  whole request".</li>
+</ul>
+<h1 id="testing-and-evidence-requirements">Testing And Evidence Requirements<a class="headerlink" href="#testing-and-evidence-requirements" title="Permanent link">&para;</a></h1>
+<p>This design is not considered implemented by unit green alone.</p>
+<p>Required evidence classes are:</p>
+<ul>
+<li>controller/unit evidence</li>
+<li>typed coverage accounting</li>
+<li>lane-assignment correctness</li>
+<li>strict fail-fast behavior</li>
+<li>executor/runtime evidence</li>
+<li>collective/local/generic lane composition</li>
+<li>no duplicate byte coverage</li>
+<li>no implicit widening after partial execution</li>
+<li>mounted serving evidence</li>
+<li>representative TP startup cases such as Example TP Model / Mixtral</li>
+<li>lane byte breakdown</li>
+<li>dominant executor shift away from generic-only path</li>
+<li>downstream integration evidence</li>
+<li>typed diagnostics visible in integration summaries and APIs</li>
+</ul>
+<p>The implementation is incomplete if the new semantics exist only in controller
+tests but are not visible in mounted diagnostics.</p>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<p>The new interface and field names proposed by this design follow repository
+style rules.</p>
+<table>
+<thead>
+<tr>
+<th>Proposed symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>COLLECTIVE_POLICY_ALLOW_NOT_ELIGIBLE_FALLBACK</code></td>
+<td>proto enum value</td>
+<td><code>ALL_CAPS</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>COLLECTIVE_POLICY_REQUIRE_COLLECTIVE</code></td>
+<td>proto enum value</td>
+<td><code>ALL_CAPS</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>SourceBoundPlanDiagnostics</code></td>
+<td>proto/message name</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>execution_plan_kind</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>planned_collective_admitted_bytes</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>planned_non_admitted_typed_bytes</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>planner_reject_reason_buckets</code></td>
+<td>field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="rollout-compatibility">Rollout &amp; Compatibility<a class="headerlink" href="#rollout-compatibility" title="Permanent link">&para;</a></h1>
+<p>Rollout should proceed in phases:</p>
+<ol>
+<li>diagnostics and terminology freeze</li>
+<li>true residual semantics</li>
+<li>collective-first lane derivation</li>
+<li>downstream default-policy adoption</li>
+<li>legacy bridge deletion</li>
+</ol>
+<p>Compatibility rules:</p>
+<ul>
+<li>new diagnostics fields are additive,</li>
+<li>this design keeps the current wire policy family and corrects its semantics
+  before any public rename cleanup,</li>
+<li>and the execution semantics must converge to the new model rather than
+  preserving the old mislabeling.</li>
+</ul>
+<p>Delete gates:</p>
+<ul>
+<li>any later public rename aliases may only be deleted after downstream
+  integrations have adopted the new names;</li>
+<li>transitional controller bridge fields may only be deleted after true residual
+  semantics are proven in mounted evidence;</li>
+<li>residual-map-based collective gating may only be deleted after the collective
+  lane is derived from typed work and the debugging contract remains satisfied.</li>
+</ul>
+<h1 id="acceptance-criteria">Acceptance Criteria<a class="headerlink" href="#acceptance-criteria" title="Permanent link">&para;</a></h1>
+<p>This design is complete only when all of the following are true.</p>
+<ol>
+<li><code>binding.realize_from(...)</code> on TP shared-source startup no longer routes the
+   majority of collectively-executable bytes through a field named
+   <code>residual_fallback_map</code>.</li>
+<li><code>pad</code> bytes are represented as explicit local typed work rather than as a
+   whole-request collective blocker.</li>
+<li>strict pure-collective mode fails before generic execution begins.</li>
+<li>default collective-first mode succeeds on mixed requests without being
+   described as a runtime fallback path.</li>
+<li>typed work rejected by a preferred executor remains typed in shared planning
+   and diagnostics until a later lowering decides how to execute it.</li>
+<li>planner and actual execution diagnostics are split clearly enough that
+   downstream operators can distinguish lane intent from backend reality.</li>
+<li><code>source_bound_contract_version = 4</code> marks the additive contract landing for
+   true residual semantics, strict preflight, and split planner/execution
+   diagnostics on this path.</li>
+<li>downstream <code>vllm</code> integration remains on the shared TensorCast
+   runtime trunk and does not introduce a private execution fork.</li>
+</ol>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>

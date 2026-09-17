@@ -1,0 +1,3302 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+        <link rel="canonical" href="https://tensorcast.ai/designs/0109-batched-owner-file-collective-executor/">
+      
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Batched Owner-File Collective Executor - TensorCast</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#summary" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="TensorCast" class="md-header__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            TensorCast
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Batched Owner-File Collective Executor
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../architecture/architecture-overview/" class="md-tabs__link">
+          
+  
+  
+  Architecture
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../guides/sdk-startup-user-guide/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../deployment/store-daemon/" class="md-tabs__link">
+          
+  
+  
+  Deployment
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../development/build-from-source/" class="md-tabs__link">
+          
+  
+  
+  Development
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+  Designs
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../internals/adding-metrics/" class="md-tabs__link">
+          
+  
+  
+  Internal
+
+        </a>
+      </li>
+    
+  
+
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="TensorCast" class="md-nav__button md-logo" aria-label="TensorCast" data-md-component="logo">
+      
+  <img src="../../assets/images/logo.png" alt="logo">
+
+    </a>
+    TensorCast
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/tensorcast-ai/tensorcast" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    tensorcast-ai/tensorcast
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Architecture
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Architecture
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/architecture-overview/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_2_3" id="__nav_2_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_2_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/api-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Design
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/error-retry-observability/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Error, Retry, Observability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/materialization-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materialization Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/policy-persistence/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    StorePolicy And Persistence
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/region-backed/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Region Backed Registration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/api/registration-flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Registration Flow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/p2p-transfer-strategies/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    P2P Transfer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/artifact-views-and-retrieval/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Views
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/view-replicas-and-assembly/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    View Replicas
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../architecture/high-availability-design/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/sdk-startup-user-guide/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SDK Startup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guides/steptron-vllm-binding-integration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    vLLM Binding
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deployment
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Deployment
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-daemon/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Daemon
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/global-store-deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Global Store
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/high-availability-usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    High Availability
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/store-session-release-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Store Session Release
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../deployment/weight-publisher/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Weight Publisher
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Development
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Development
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/build-from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build from Source
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../development/security-checks/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Security Checks
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
+        
+          
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Designs
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Designs
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
+        
+          
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internal
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internal
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_1" id="__nav_7_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Internals
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Internals
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/adding-metrics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Adding New Metrics (C++ & Python)
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/byte-range-mapping-and-execution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Byte-Range Mapping and Execution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/canonical-index/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Canonical Index Deep Dive
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-gate-checklist/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multi-Host Chaos Gate Checklist
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/chaos-report-template/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Chaos Report Template
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/disk-load-strategy/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Disk Load Strategy
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/model-loading/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Artifact Loading Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/preemptible-memory/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    内部可抢占内存机制
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/save_dict_flow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    save_dict Workflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor_dict_into_dataflow/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tensor_dict_into Dataflow
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../internals/tensor-first-artifact-architecture/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tensor First Artifact Architecture
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_2" id="__nav_7_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Plans
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../plans/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Plans
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_7_3" id="__nav_7_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Distributed Coordination
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_7_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_7_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Distributed Coordination
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    分布式协调系列（收敛版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    01. 全局最优与分布式执行统一框架（现状锚定版）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../distributed-coordination-series/02-mode-switching-workload-playbook-and-governance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    02. 模式切换、工作负载画像与治理落地（决策手册）
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="summary">Summary<a class="headerlink" href="#summary" title="Permanent link">&para;</a></h1>
+<p>Introduce a new common-runtime executor:</p>
+<ul>
+<li><code>OwnerFileBatchedCollectiveExecutor</code></li>
+</ul>
+<p>This executor is designed to replace the current eager owner-file collective
+prototype for shared-filesystem, same-host tensor-parallel cold starts.</p>
+<p>It is intended to become the default collective executor for that workload
+family only after the pre-109 strategy-plane convergence work is complete.</p>
+<p>The design is inspired by the parts of <code>fastsafetensors</code> that are currently
+winning in practice:</p>
+<ul>
+<li>owner-file source ownership,</li>
+<li>bounded file batching,</li>
+<li>release-after-use memory behavior,</li>
+<li>GPU-side cross-rank distribution.</li>
+</ul>
+<p>But it is not a framework-specific clone of <code>fastsafetensors</code>. It remains
+strictly inside TensorCast's selection-first architecture:</p>
+<ul>
+<li><code>ArtifactSelection</code> remains the only public selection contract,</li>
+<li><code>MaterializationFacade</code> remains the lowering boundary,</li>
+<li><code>ByteRangeMap</code> remains the canonical fallback IR,</li>
+<li>source acquisition stays separate from semantic truth and executor choice,</li>
+<li>execution environment facts stay separate from retrieval policy and semantic
+  truth,</li>
+<li>mixed execution remains allowed.</li>
+</ul>
+<p>The key idea is:</p>
+<ul>
+<li>keep the good part of file ownership and cross-rank source dedup,</li>
+<li>remove the bad part of eager whole-owner payload preloading,</li>
+<li>preserve tensor and target-layout semantics all the way to executor lowering,</li>
+<li>use bounded batches that read only necessary source spans and release owner
+  staging immediately after commit.</li>
+</ul>
+<p>This design exists to close the remaining shared-filesystem gap against
+<code>fastsafetensors</code> without violating TensorCast's internal layering and without
+reverting to vLLM- or model-specific special cases.</p>
+<p>Normative source rule:</p>
+<ul>
+<li>TensorCast does not need to preserve broad production compatibility while this
+  executor lands,</li>
+<li>the repo-owned benchmark notes, strategy-plane designs, and this design are
+  the normative record for what TensorCast adopts,</li>
+<li>external <code>fastsafetensors</code> code is non-normative implementation reference
+  only,</li>
+<li>temporary migration fallbacks are acceptable only to stage rollout evidence
+  and must be removed once the new executor is proven.</li>
+</ul>
+<h1 id="implementation-status">Implementation Status<a class="headerlink" href="#implementation-status" title="Permanent link">&para;</a></h1>
+<p>The phase-1 scope of this design is now landed in the repository:</p>
+<ul>
+<li>ordinary disk startup requires explicit shared-source proof before
+  owner-file collective becomes eligible under <code>AUTO</code></li>
+<li><code>MaterializationFacade</code> prefers owner-file collective for eligible
+  shared-source TP startup and keeps host-local or unproven-source requests on
+  local-batched or generic execution</li>
+<li><code>collective_disk_load</code> now builds a bounded owner batch plan with weighted
+  file ownership, optional job-level split for skew control, and batch-local
+  owner staging</li>
+<li>replicated, dim0, and dim1 collective tensor work now execute through the
+  owner rank without eager <code>owned_payload</code> residency</li>
+<li>the selected owner-file batched route no longer drops back to root
+  whole-source preload scaffolding, and execution diagnostics now surface
+  actual unique-source bytes, peer-transfer bytes, peak temporary bytes, batch
+  count, and dedup savings</li>
+</ul>
+<p>The implemented steady-state scope remains intentionally zero-residual-only:</p>
+<ul>
+<li>owner-file collective eligibility still rejects requests with true generic
+  residual bytes</li>
+<li>mixed execution remains strategy-owned:</li>
+<li>local typed work must already be peeled off before this executor is chosen,</li>
+<li>typed work that is not admitted to the collective lane must remain typed in
+    shared planning rather than being silently recast as residual inside this
+    executor</li>
+<li>collective runtime therefore remains collective-lane-only rather than
+  becoming the owner of mixed-execution semantics</li>
+</ul>
+<p>Residual execution tracking is now closed back into the surviving design and
+benchmark record:</p>
+<ul>
+<li>the standalone <code>0109-01</code> rollout plan is retired,</li>
+<li>the current mounted collective evidence lives in
+  <code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code>,</li>
+<li><code>0108</code> remains the sole strategy-plane owner,</li>
+<li><code>0112</code> remains the same-binding serving-path owner,</li>
+<li>and this design now records only the executor-specific policy and runtime
+  semantics that survived closure.</li>
+</ul>
+<h2 id="closure-evidence">Closure Evidence<a class="headerlink" href="#closure-evidence" title="Permanent link">&para;</a></h2>
+<p>The <code>2026-04-15</code> mounted qwen2.5 TP4 rerun on the current <code>v4</code> contract shows:</p>
+<ul>
+<li><code>bootstrap_source_bound_contract_version=4</code></li>
+<li><code>bootstrap_source_bound_contract_path=collective_first_v4</code></li>
+<li><code>bootstrap_realize_collective_policy=collective_first</code></li>
+<li><code>planned_collective_admitted_bytes=16382928896</code></li>
+<li><code>actual_collective_committed_bytes=16382928896</code></li>
+<li><code>actual_generic_backend_bytes=0</code></li>
+<li><code>dominant_executor=OwnerFileCollectiveExecutor</code></li>
+<li><code>collective_unique_source_bytes=75762083840</code></li>
+<li><code>collective_peer_transfer_bytes=49148786688</code></li>
+<li><code>collective_peak_temporary_bytes=268435456</code></li>
+<li><code>collective_batch_count=437</code></li>
+<li><code>collective_dedup_saving_bytes=0</code></li>
+<li>and serving correctness probes <code>/health</code>, <code>/v1/models</code>, and
+  <code>/v1/completions</code> all returned <code>200</code>.</li>
+</ul>
+<p>The companion benchmark note also records the same-host TP4 <code>safetensors</code>
+baseline:</p>
+<ul>
+<li>weight loading <code>6.26s</code> to <code>6.28s</code>,</li>
+<li>ready wall time about <code>31s</code>,</li>
+<li>versus TensorCast mounted ready wall time about <code>59s</code>.</li>
+</ul>
+<p>That comparison closes the remaining policy ambiguity:</p>
+<ul>
+<li>host-local workloads do <strong>not</strong> graduate to collective default,</li>
+<li>shared-source workloads remain collective-eligible only under explicit
+  shared-source proof plus the typed daemon policy,</li>
+<li>and the current qwen2.5 mounted packet is sufficient to validate the
+  collective-dominant executor path without granting a broader "all local loads
+  should default to collective" conclusion.</li>
+</ul>
+<h1 id="sequencing-note">Sequencing Note<a class="headerlink" href="#sequencing-note" title="Permanent link">&para;</a></h1>
+<p>This design is downstream of two prerequisites:</p>
+<ul>
+<li>the runtime-critical request-normalization boundary from <code>0107</code>,</li>
+<li>the common-runtime strategy convergence work now folded back into <code>0108</code>.</li>
+</ul>
+<p>Those prerequisites are now landed in this repository. <code>0109</code> should start from
+the already-converged seams:</p>
+<ul>
+<li>normalized retrieval-policy versus execution-topology inputs,</li>
+<li>ordinary-disk <code>ExecutionStrategyPlan</code> ownership in <code>MaterializationFacade</code>,</li>
+<li>executor-runner-only replica/runtime ownership,</li>
+<li>typed owner-file budget and timeout fields under
+  <code>engine.materialization_strategy</code>.</li>
+</ul>
+<p>It must not be used to justify adding more branch-order policy to <code>Replica</code>,
+<code>ReplicaLoadController</code>, or <code>collective_disk_loader.cc</code>. The executor belongs on
+top of the converged strategy-plane boundary, not inside today's prototype
+ownership seams.</p>
+<h1 id="non-normative-external-reference-material">Non-Normative External Reference Material<a class="headerlink" href="#non-normative-external-reference-material" title="Permanent link">&para;</a></h1>
+<p>This design intentionally uses <code>fastsafetensors</code> as an implementation
+reference, but only for the parts that are actually winning in practice.</p>
+<p>Those references are illustrative only. The absorbed invariants are restated in
+this design so implementation and review do not depend on an external workspace
+being present.</p>
+<p>Relevant local workspace references:</p>
+<ul>
+<li>code:</li>
+<li><code>/opt/fastsafetensors/fastsafetensors/loader.py</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/file_buffer.py</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/tensor_factory.py</code></li>
+<li>docs:</li>
+<li><code>/opt/fastsafetensors/docs/architecture.md</code></li>
+<li><code>/opt/fastsafetensors/docs/safetensors-load-optimization.md</code></li>
+</ul>
+<p>The most important implementation behaviors are:</p>
+<ul>
+<li>owner-file batching and orchestration:</li>
+<li><code>BaseSafeTensorsFileLoader.add_filenames(...)</code></li>
+<li><code>BaseSafeTensorsFileLoader.copy_files_to_device(...)</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/loader.py</code></li>
+<li>per-batch device-buffer lifetime:</li>
+<li><code>FilesBufferOnDevice</code></li>
+<li><code>fb.close()</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/file_buffer.py</code></li>
+<li>owner-mediated GPU-side distribution:</li>
+<li><code>LazyTensorFactory.shuffle(...)</code></li>
+<li><code>LazyTensorFactory.push(...)</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/tensor_factory.py</code></li>
+</ul>
+<p>The key lesson from those files is not merely “use owner rank”.
+The key lesson is:</p>
+<ul>
+<li>bound temporary owner memory by batch,</li>
+<li>distribute from the owner immediately,</li>
+<li>release current batch buffers after use,</li>
+<li>never require a whole-model extra owner payload on GPU.</li>
+</ul>
+<h1 id="problem-statement">Problem Statement<a class="headerlink" href="#problem-statement" title="Permanent link">&para;</a></h1>
+<p>The current repository has three relevant disk-backed execution shapes for
+ordinary <code>tensor_dict(...)</code> startup:</p>
+<ul>
+<li><code>collective_disk_load</code></li>
+<li><code>local_batched_disk_load</code></li>
+<li>generic residual <code>ByteRangeMap</code> fallback</li>
+</ul>
+<p>The current shared-filesystem regression shows that these shapes are not enough.</p>
+<p>Observed behavior on the Example TP Model TP=8 workload:</p>
+<ul>
+<li>Current eager collective path can read far more source bytes than the actual
+  selected TP-local target workload.</li>
+<li>Example observed run:<ul>
+<li>selected <code>dim0</code> workload about <code>23.14 GiB</code></li>
+<li>current collective <code>dim0_source_bytes</code> about <code>198.76 GiB</code></li>
+<li><code>dim0_exec</code> about <code>115.61s</code></li>
+</ul>
+</li>
+<li>Current eager owner-file collective prototype avoids part of that amplification
+  but still preloads whole owner payloads into GPU memory.</li>
+<li>For the current 44-shard model, that means roughly <code>21 GiB</code> to <code>30 GiB</code>
+    extra owner payload per rank before final target bytes are counted.</li>
+<li>In practice this hits GPU OOM.</li>
+<li>Current <code>local_batched_disk_load</code> is a good stopgap and already much better
+  than the old collective path, but it still leaves performance on the table on
+  shared filesystems:</li>
+<li>ranks still duplicate source reads,</li>
+<li><code>dim1</code> currently reads full row blocks and can amplify source bytes by <code>8x</code>
+    for TP=8 column partitioning,</li>
+<li>it does not perform cross-rank source dedup.</li>
+</ul>
+<p>At the same time, experiments already show that TensorCast's core data plane is
+not fundamentally slower than <code>fastsafetensors</code>:</p>
+<ul>
+<li>exact single-rank <code>879</code> source-tensor subset:</li>
+<li>TensorCast common path: about <code>7.1s</code></li>
+<li><code>fastsafetensors</code>: about <code>7.5s</code></li>
+<li>exact large <code>dim0</code> subsets on host-local SSD:</li>
+<li>TensorCast non-collective subset materialization already meets or exceeds
+    the same <code>fastsafetensors</code> subset runs</li>
+</ul>
+<p>These results imply:</p>
+<ul>
+<li>the main remaining gap is not single-rank H2D or basic tensor materialization,</li>
+<li>the main gap is cross-rank execution shape on shared source media,</li>
+<li>current eager collective and eager owner-file collective are both wrong
+  execution models for this workload.</li>
+</ul>
+<h1 id="goals-non-goals">Goals / Non-Goals<a class="headerlink" href="#goals-non-goals" title="Permanent link">&para;</a></h1>
+<h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Match or beat <code>fastsafetensors</code> on shared-filesystem TP cold start for the
+  same end-to-end workload.</li>
+<li>Become the default collective executor for shared-filesystem, same-host TP
+  cold start once the prerequisite strategy-plane convergence work is landed.</li>
+<li>Preserve TensorCast's public selection-first model:</li>
+<li><code>ArtifactSelection</code></li>
+<li><code>tensor_dict</code></li>
+<li><code>materialize_view</code></li>
+<li><code>bind_into</code></li>
+<li><code>MaterializeIntoMappedTarget</code></li>
+<li>Keep strategy selection inside the common runtime, not in vLLM.</li>
+<li>Replace eager whole-owner-payload VRAM preloading with bounded batching.</li>
+<li>Deduplicate cross-rank source reads when source media is shared.</li>
+<li>Preserve mixed execution:</li>
+<li>tensor-aware direct reads,</li>
+<li>staged 2D dim1 packing,</li>
+<li>owner-file peer distribution,</li>
+<li>residual generic fallback.</li>
+<li>Keep <code>ByteRangeMap</code> as the canonical fallback and explainability surface.</li>
+<li>Fit within typed daemon config under <code>engine.materialization_strategy</code>.</li>
+</ul>
+<h2 id="non-goals">Non-Goals<a class="headerlink" href="#non-goals" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Add model-name or tensor-name hardcoding.</li>
+<li>Add vLLM-only fast paths.</li>
+<li>Replace <code>ArtifactSelection</code> with a new public contract.</li>
+<li>Force owner-file collective on host-local SSD where local-batched may still
+  be the right executor.</li>
+<li>Replace <code>TensorBatchedLocalExecutor</code> as the global default disk executor.</li>
+<li>Encode executor-private plans into public SDK or proto request fields.</li>
+<li>Depend on whole-owner-payload persistent VRAM residency.</li>
+<li>Skip the pre-109 convergence work and wire this executor directly into the
+  current replica-layer prototype boundaries.</li>
+</ul>
+<h1 id="prior-constraints-reviewed">Prior Constraints Reviewed<a class="headerlink" href="#prior-constraints-reviewed" title="Permanent link">&para;</a></h1>
+<ul>
+<li><code>0108</code> correctly requires strategy selection to happen before generic lowering,
+  but it did not yet make ordinary replica convergence, cost-model routing, and
+  coordinator boundaries explicit enough for a default collective executor.</li>
+<li><code>0107</code> correctly separates retrieval policy from rollout policy, but it needed
+  a clearer execution-topology boundary so collective context would not be
+  modeled as retrieval policy.</li>
+<li>The current repository prototype proved that file ownership and peer
+  distribution are useful, but the eager <code>owned_payload</code> and optional root
+  whole-source preload shapes are not acceptable long-term defaults.</li>
+<li>The host-local/local-batched bias remains correct and is kept. This design
+  narrows its default claim to shared-source collective startup only.</li>
+</ul>
+<h1 id="current-state">Current State<a class="headerlink" href="#current-state" title="Permanent link">&para;</a></h1>
+<h2 id="1-current-eager-collective-is-too-coarse">1. Current eager collective is too coarse<a class="headerlink" href="#1-current-eager-collective-is-too-coarse" title="Permanent link">&para;</a></h2>
+<p><code>collective_disk_load</code> today is transport-first.</p>
+<p>It is good at:</p>
+<ul>
+<li>building same-host TP collectives,</li>
+<li>using GPU-side communication,</li>
+<li>reusing a shared root stage buffer.</li>
+</ul>
+<p>It is bad at:</p>
+<ul>
+<li>preserving tensor-level locality all the way to execution,</li>
+<li>limiting source reads to only the necessary TP-local tensor bytes,</li>
+<li>handling shared-filesystem cold starts without large read amplification.</li>
+</ul>
+<p>In particular, current collective execution still tends to collapse a
+selection-aware tensor workload into:</p>
+<ul>
+<li>root-side reads,</li>
+<li>coarse owner payload preloads,</li>
+<li>or generic source windows and piece plans.</li>
+</ul>
+<p>That loses too much information too early.</p>
+<h2 id="2-current-eager-owner-file-prototype-is-too-memory-hungry">2. Current eager owner-file prototype is too memory-hungry<a class="headerlink" href="#2-current-eager-owner-file-prototype-is-too-memory-hungry" title="Permanent link">&para;</a></h2>
+<p>The current owner-file code path in <code>collective_disk_loader.cc</code> is close in
+shape to the benchmark's eager Strategy A:</p>
+<ul>
+<li>assign files to owner ranks,</li>
+<li>preload all owner files into <code>owned_payload</code> on the owner's GPU,</li>
+<li>then run local pack plus NCCL <code>send/recv</code>.</li>
+</ul>
+<p>This proves that file ownership is a useful idea, but it also proves that eager
+whole-owner preload is not viable for large TP workloads. It creates a second
+GPU-resident copy of a large fraction of the model.</p>
+<p>This is the key reason the current owner-file path OOMs.</p>
+<p>This is also the most important difference from <code>fastsafetensors</code>:</p>
+<ul>
+<li>current TensorCast eager owner-file path:</li>
+<li>precomputes large owner payload totals,</li>
+<li>allocates a long-lived <code>owned_payload</code>,</li>
+<li>and fills it before distribution</li>
+<li><code>fastsafetensors</code>:</li>
+<li>batches files in <code>loader.py</code>,</li>
+<li>materializes one batch with <code>copy_files_to_device(...)</code>,</li>
+<li>distributes through <code>file_buffer.py</code> / <code>tensor_factory.py</code>,</li>
+<li>then releases the batch via <code>fb.close()</code></li>
+</ul>
+<p>That difference in lifetime and peak temporary memory is the direct reason
+<code>fastsafetensors</code> avoids the OOM currently seen in TensorCast's eager owner-file
+prototype.</p>
+<h2 id="3-current-local-batched-path-is-a-good-stopgap-but-not-the-end-state">3. Current local-batched path is a good stopgap but not the end state<a class="headerlink" href="#3-current-local-batched-path-is-a-good-stopgap-but-not-the-end-state" title="Permanent link">&para;</a></h2>
+<p><code>local_batched_disk_load</code> is already selection-aware and is often the best
+current ordinary disk executor.</p>
+<p>It is the right default stopgap because it:</p>
+<ul>
+<li>avoids the worst collective read amplification,</li>
+<li>does not require whole-owner payloads,</li>
+<li>is already correct and stable enough for production startup.</li>
+</ul>
+<p>But it remains single-rank and does not solve the cross-rank shared source
+duplication problem. On shared filesystems that still leaves real performance on
+the table.</p>
+<p>Current runtime starting point after the converged <code>0108</code> strategy seam:</p>
+<ul>
+<li>ordinary disk startup already builds a common-runtime <code>ExecutionStrategyPlan</code>,</li>
+<li><code>AUTO</code> currently prefers <code>TensorBatchedLocalExecutor</code> before the collective
+  prototype,</li>
+<li>the owner-file collective candidate is non-default and still dispatches into
+  the current <code>collective_disk_load</code> prototype runtime when explicitly selected.</li>
+</ul>
+<h2 id="4-fastsafetensors-provides-the-right-memory-lesson-not-the-final-shape">4. <code>fastsafetensors</code> provides the right memory lesson, not the final shape<a class="headerlink" href="#4-fastsafetensors-provides-the-right-memory-lesson-not-the-final-shape" title="Permanent link">&para;</a></h2>
+<p><code>fastsafetensors</code> currently wins because its runtime behavior is bounded:</p>
+<ul>
+<li>files are assigned to owner ranks,</li>
+<li>files are processed in batches,</li>
+<li>current batch buffers are closed and freed after use,</li>
+<li>cross-rank distribution is done on GPU with framework collectives.</li>
+</ul>
+<p>This gives it two practical advantages over current TensorCast eager owner-file:</p>
+<ul>
+<li>it avoids whole-model extra VRAM preload,</li>
+<li>it keeps peak temporary owner memory bounded by a small batch.</li>
+</ul>
+<p>TensorCast should adopt that memory discipline.</p>
+<p>But TensorCast should not stop there.</p>
+<p>Unlike <code>fastsafetensors</code>, TensorCast also knows:</p>
+<ul>
+<li>resolved selection identity,</li>
+<li>resolved view identity,</li>
+<li>exact TP-local slice hull,</li>
+<li>target layout,</li>
+<li>copy-contract structure,</li>
+<li>residual coverage and fallback accounting.</li>
+</ul>
+<p>So the long-term TensorCast executor should be:</p>
+<ul>
+<li>at least as memory-safe as <code>fastsafetensors</code>,</li>
+<li>more target-layout-aware than <code>fastsafetensors</code>.</li>
+</ul>
+<h2 id="5-concept-mapping-to-fastsafetensors">5. Concept mapping to <code>fastsafetensors</code><a class="headerlink" href="#5-concept-mapping-to-fastsafetensors" title="Permanent link">&para;</a></h2>
+<p>The implementation relationship should be explicit.</p>
+<h3 id="51-what-tensorcast-should-preserve-that-fastsafetensors-does-not-model">5.1 What TensorCast should preserve that <code>fastsafetensors</code> does not model<a class="headerlink" href="#51-what-tensorcast-should-preserve-that-fastsafetensors-does-not-model" title="Permanent link">&para;</a></h3>
+<p>TensorCast must preserve:</p>
+<ul>
+<li><code>ArtifactSelection</code></li>
+<li><code>view_id</code></li>
+<li><code>ResolvedMaterializationPlan</code></li>
+<li><code>RepresentationTransformContract</code></li>
+<li>residual coverage and <code>ExecutionCommitReport</code></li>
+</ul>
+<p><code>fastsafetensors</code> does not expose these abstractions. Its effective planning
+state is the combination of:</p>
+<ul>
+<li>file metadata and tensor frames in <code>loader.py</code></li>
+<li>owner-file routing in <code>loader.py</code></li>
+<li>per-tensor access order in <code>file_buffer.py</code></li>
+<li>collective semantics in <code>tensor_factory.py</code></li>
+</ul>
+<p>This is why TensorCast should not directly embed <code>fastsafetensors</code> as a second
+loading stack. TensorCast has richer semantic truth and should keep it.</p>
+<h3 id="52-what-tensorcast-should-borrow-directly">5.2 What TensorCast should borrow directly<a class="headerlink" href="#52-what-tensorcast-should-borrow-directly" title="Permanent link">&para;</a></h3>
+<p>TensorCast should borrow the following runtime behaviors:</p>
+<ul>
+<li>owner-file assignment as an execution strategy</li>
+<li>batch-bounded temporary owner memory</li>
+<li>release-after-use batch lifetime</li>
+<li>owner-mediated GPU-side distribution</li>
+</ul>
+<h3 id="53-what-tensorcast-should-improve-beyond-fastsafetensors">5.3 What TensorCast should improve beyond <code>fastsafetensors</code><a class="headerlink" href="#53-what-tensorcast-should-improve-beyond-fastsafetensors" title="Permanent link">&para;</a></h3>
+<p>TensorCast should go further by using:</p>
+<ul>
+<li>direct writes into final target layout</li>
+<li>staged dim1 packing only when required</li>
+<li>mixed execution with residual generic fallback</li>
+<li>selection-aware and contract-aware batching</li>
+</ul>
+<p>That is the point where TensorCast should stop “copying a good idea” and start
+using the additional semantics that only TensorCast already has.</p>
+<h1 id="design-principles">Design Principles<a class="headerlink" href="#design-principles" title="Permanent link">&para;</a></h1>
+<h2 id="1-stay-inside-the-0108-strategy-plane">1. Stay inside the 0108 strategy plane<a class="headerlink" href="#1-stay-inside-the-0108-strategy-plane" title="Permanent link">&para;</a></h2>
+<p>This design is a follow-on to <code>0108</code>, not a competing architecture.</p>
+<p>It keeps the same layering:</p>
+<ul>
+<li>controller safety boundary stays in daemon controllers,</li>
+<li>semantic resolution stays in <code>ResolvedMaterializationPlan</code>,</li>
+<li>source acquisition stays separate,</li>
+<li>executor lowering stays in <code>MaterializationFacade</code>,</li>
+<li>residual fallback stays in generic byte-range execution.</li>
+</ul>
+<p>The new executor is therefore not:</p>
+<ul>
+<li>a vLLM-specific loader trick,</li>
+<li>a benchmark-only path,</li>
+<li>or a new public contract.</li>
+</ul>
+<p>It is one additional executor choice inside the existing strategy plane.</p>
+<p>It is explicitly <strong>not</strong> the future topology-scoped reshard executor.</p>
+<ul>
+<li>This design optimizes disk-backed, shared-source, tensor-aware materialization.</li>
+<li>Future communicator-aware group reshard execution may later reuse the same
+  semantic core, but it should be specified as a separate executor design rather
+  than folded into owner-file collective behavior.</li>
+</ul>
+<h2 id="2-file-ownership-is-an-execution-strategy-not-semantic-truth">2. File ownership is an execution strategy, not semantic truth<a class="headerlink" href="#2-file-ownership-is-an-execution-strategy-not-semantic-truth" title="Permanent link">&para;</a></h2>
+<p>Owner assignment must not leak into:</p>
+<ul>
+<li><code>ArtifactSelection</code>,</li>
+<li><code>view_id</code>,</li>
+<li><code>selection_hash</code>,</li>
+<li>or copy-contract truth.</li>
+</ul>
+<p>File ownership is strictly an executor-private planning artifact derived after:</p>
+<ul>
+<li>semantic truth is resolved,</li>
+<li><code>RepresentationWorkPlan</code> is derived,</li>
+<li>source capabilities are known,</li>
+<li>target placement is known.</li>
+</ul>
+<h2 id="3-tensorcast-should-adopt-bounded-owner-batching-not-eager-owner-preload">3. TensorCast should adopt bounded owner batching, not eager owner preload<a class="headerlink" href="#3-tensorcast-should-adopt-bounded-owner-batching-not-eager-owner-preload" title="Permanent link">&para;</a></h2>
+<p>The main lesson from <code>fastsafetensors</code> is not “use owner rank”.
+The main lesson is:</p>
+<ul>
+<li>bound peak temporary memory,</li>
+<li>process source in batches,</li>
+<li>free temporary owner state immediately after commit.</li>
+</ul>
+<p>That is the minimum requirement for a usable owner-file collective path.</p>
+<h2 id="4-tensorcast-should-use-its-extra-semantic-knowledge-to-go-beyond">4. TensorCast should use its extra semantic knowledge to go beyond<a class="headerlink" href="#4-tensorcast-should-use-its-extra-semantic-knowledge-to-go-beyond" title="Permanent link">&para;</a></h2>
+<p>TensorCast should outperform <code>fastsafetensors</code> by exploiting:</p>
+<ul>
+<li>direct writes into final target layout,</li>
+<li>staged 2D pack only when necessary,</li>
+<li>source-slice dedup across ranks,</li>
+<li>residual fallback only for the small irregular tail.</li>
+</ul>
+<p>This is exactly the kind of shape described by the benchmark's Strategy C.</p>
+<h2 id="5-default-routing-must-be-cost-model-driven">5. Default routing must be cost-model driven<a class="headerlink" href="#5-default-routing-must-be-cost-model-driven" title="Permanent link">&para;</a></h2>
+<p>This executor must not become default merely because collective context is
+present.</p>
+<p><code>AUTO</code> policy should choose it only when the planner can show that:</p>
+<ul>
+<li>shared-source dedup is real for the current request,</li>
+<li>the estimated owner skew stays within policy,</li>
+<li>peak temporary bytes stay within typed budgets,</li>
+<li>the expected collective and planner overhead is repaid by lower source reads,</li>
+<li>and the residual tail is explicit and acceptable for the current rollout
+  stage.</li>
+</ul>
+<h1 id="proposed-architecture">Proposed Architecture<a class="headerlink" href="#proposed-architecture" title="Permanent link">&para;</a></h1>
+<h2 id="1-introduce-ownerfilebatchedcollectiveexecutor">1. Introduce <code>OwnerFileBatchedCollectiveExecutor</code><a class="headerlink" href="#1-introduce-ownerfilebatchedcollectiveexecutor" title="Permanent link">&para;</a></h2>
+<p>Add a new common-runtime executor:</p>
+<ul>
+<li><code>OwnerFileBatchedCollectiveExecutor</code></li>
+</ul>
+<p>This executor replaces the current eager owner-file prototype for shared-FS
+collective startup.</p>
+<p>It is intended for requests where:</p>
+<ul>
+<li>the source is disk-backed and shared across ranks,</li>
+<li>the request is TP collective eligible,</li>
+<li>cross-rank source dedup is expected to beat fully independent local reads,</li>
+<li>and the request has enough tensor structure to avoid generic fallback for the
+  bulk of bytes.</li>
+</ul>
+<h3 id="11-phase-1-scope">1.1 Phase-1 scope<a class="headerlink" href="#11-phase-1-scope" title="Permanent link">&para;</a></h3>
+<p>The first production wave is intentionally narrower than the full long-term
+executor model.</p>
+<p>Phase-1 scope:</p>
+<ul>
+<li>ordinary disk-backed <code>tensor_dict(...)</code> startup,</li>
+<li>same-host TP collective groups,</li>
+<li>safetensors sources with complete metadata,</li>
+<li>replicated, dim0, and 2D dim1 tensor work as the dominant bytes.</li>
+</ul>
+<p>Deferred follow-on scope:</p>
+<ul>
+<li>cross-topology reshard,</li>
+<li>executor-owned concat irregular tails,</li>
+<li>arbitrary mapped-target execution as part of the default rollout claim.</li>
+</ul>
+<h2 id="2-execution-model">2. Execution model<a class="headerlink" href="#2-execution-model" title="Permanent link">&para;</a></h2>
+<p>The executor runs in bounded batches, not one eager preload pass.</p>
+<h3 id="21-strategy-inputs">2.1 Strategy inputs<a class="headerlink" href="#21-strategy-inputs" title="Permanent link">&para;</a></h3>
+<p>The planner should consume:</p>
+<ul>
+<li><code>ResolvedMaterializationPlan</code></li>
+<li><code>RepresentationWorkPlan</code></li>
+<li>collective-lane-local lowering derived by the <code>0108</code> strategy plane</li>
+<li><code>ResolvedSourceBinding</code></li>
+<li><code>ExecutionEnvironmentFacts</code></li>
+<li>typed materialization-strategy policy</li>
+</ul>
+<p>This keeps:</p>
+<ul>
+<li>semantic truth in <code>0108</code>,</li>
+<li>topology/locality context in the <code>0107</code> execution-topology plane,</li>
+<li>and executor-private batching inside this executor only.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>this executor must not recover its primary request graph from
+  <code>residual_fallback_map</code>;</li>
+<li>it consumes collective-admitted work only, while residual fallback remains
+  outside the executor as a separate lane.</li>
+</ul>
+<h3 id="22-default-routing-and-eligibility">2.2 Default routing and eligibility<a class="headerlink" href="#22-default-routing-and-eligibility" title="Permanent link">&para;</a></h3>
+<p>This executor is eligible only when all of the following hold:</p>
+<ul>
+<li>collective group context is present and same-host,</li>
+<li>the source is disk-backed and shared across ranks,</li>
+<li>shared-source locality is explicit or otherwise proven by runtime-owned
+  evidence; <code>source_locality=AUTO</code> is not sufficient proof for default routing,</li>
+<li>metadata is complete enough to build tensor-aware work,</li>
+<li>estimated owner peak temporary bytes fit configured budgets,</li>
+<li>estimated owner skew stays below configured thresholds,</li>
+<li>estimated dedup savings exceed planner and collective overhead,</li>
+<li>and residual handling satisfies the current rollout stage.</li>
+</ul>
+<p>Normative rule:</p>
+<ul>
+<li>when these conditions do not hold, <code>AUTO</code> must prefer
+  <code>TensorBatchedLocalExecutor</code> or generic fallback rather than forcing
+  owner-file collective.</li>
+<li>the initial <code>0109</code> rollout must require either:</li>
+<li>explicit <code>ExecutionTopologyContext.source_locality = SHARED_SOURCE</code>, or</li>
+<li>daemon-managed shared-disk provenance that proves ranks share the same
+    backing source domain.</li>
+</ul>
+<p>Each batch contains a subset of source work such that:</p>
+<ul>
+<li>owner-side temporary GPU bytes stay below a configured peak budget,</li>
+<li>staging bytes stay below a configured staging budget,</li>
+<li>NCCL or peer-transfer group size stays below a configured launch budget,</li>
+<li>batch lifetime ends as soon as all destinations for that batch are committed.</li>
+</ul>
+<p>At a high level:</p>
+<ol>
+<li>lower the request into tensor-aware work items,</li>
+<li>group those items by owner file and source locality,</li>
+<li>split them into batches under memory budgets,</li>
+<li>for each batch:</li>
+<li>owner rank reads only necessary source spans,</li>
+<li>owner rank writes local destination bytes directly into final layout,</li>
+<li>owner rank distributes peer bytes via collective send or scatter,</li>
+<li>dim1 and other strided cases use bounded staging and pack,</li>
+<li>batch staging is released immediately after commit,</li>
+<li>residual irregular work falls back to generic byte-range execution.</li>
+</ol>
+<p>This means no persistent <code>owned_payload</code> equal to “all owner files for this
+rank”.</p>
+<p>This is the main point where the design intentionally follows the
+<code>fastsafetensors</code> memory model while still keeping TensorCast's richer planner
+shape.</p>
+<h2 id="3-planner-output">3. Planner output<a class="headerlink" href="#3-planner-output" title="Permanent link">&para;</a></h2>
+<p>The planner stays executor-private and is derived inside the strategy plane.</p>
+<p>It should not become SDK or proto surface.</p>
+<p>It is also intentionally downstream of shared typed work and shared lane
+allocation:</p>
+<ul>
+<li><code>0110</code> owns the executor-neutral typed work inventory,</li>
+<li><code>0108</code> owns lane allocation and residual accounting,</li>
+<li><code>0109</code> owns only the executor-private plan for the collective-admitted lane.</li>
+</ul>
+<p>The planner should construct an internal batch plan family, for example:</p>
+<ul>
+<li><code>OwnerBatchPlan</code></li>
+<li>owner rank</li>
+<li>source file</li>
+<li>source span set</li>
+<li>batch bytes</li>
+<li>committed destination ranges</li>
+<li>estimated temporary bytes</li>
+<li>estimated peer bytes</li>
+<li>op list</li>
+<li><code>OwnerBatchOp</code></li>
+<li><code>DirectReadToFinalOp</code></li>
+<li><code>StagedDim1PackOp</code></li>
+<li><code>ReplicatedSendOp</code></li>
+<li><code>Dim0ScatterOp</code></li>
+<li><code>DedupPeerCopyOp</code></li>
+<li><code>ResidualFallbackOp</code></li>
+</ul>
+<p>This is aligned with <code>0108</code>:</p>
+<ul>
+<li>executor-private ops stay executor-private,</li>
+<li>semantic truth remains in <code>ResolvedMaterializationPlan</code> and
+  <code>RepresentationTransformContract</code>,</li>
+<li>residual byte accounting is still reported through <code>ExecutionCommitReport</code>.</li>
+</ul>
+<h2 id="4-direct-staged-and-residual-paths">4. Direct, staged, and residual paths<a class="headerlink" href="#4-direct-staged-and-residual-paths" title="Permanent link">&para;</a></h2>
+<h3 id="41-direct-contiguous-path">4.1 Direct contiguous path<a class="headerlink" href="#41-direct-contiguous-path" title="Permanent link">&para;</a></h3>
+<p>For replicated and dim0-contiguous slices:</p>
+<ul>
+<li>read only the required contiguous source span,</li>
+<li>write owner-local bytes directly into final owner output,</li>
+<li>distribute peer-local bytes directly from the read span,</li>
+<li>do not materialize a whole tensor payload if the request only needs a slice.</li>
+</ul>
+<h3 id="42-staged-dim1-path">4.2 Staged dim1 path<a class="headerlink" href="#42-staged-dim1-path" title="Permanent link">&para;</a></h3>
+<p>For dim1 or other non-contiguous tensor layouts:</p>
+<ul>
+<li>compute the minimum row-range staging windows that cover the selected slices,</li>
+<li>read bounded row-blocks into a staging slab,</li>
+<li>use 2D or structured GPU pack into final layout,</li>
+<li>distribute peer slices from staged or packed results as appropriate.</li>
+</ul>
+<p>This is specifically meant to replace the current “read full rows for dim1”
+behavior when collective owner execution is chosen.</p>
+<h3 id="43-residual-fallback">4.3 Residual fallback<a class="headerlink" href="#43-residual-fallback" title="Permanent link">&para;</a></h3>
+<p>Residual ranges that cannot be safely handled by the batched owner-file plan
+continue to use the generic byte-range path.</p>
+<p>This keeps:</p>
+<ul>
+<li>correctness,</li>
+<li>explainability,</li>
+<li>and rollout safety.</li>
+</ul>
+<p>Current phase rule:</p>
+<ul>
+<li>owner-file collective must not partially execute a request and then implicitly
+  derive residual generic fallback at runtime,</li>
+<li>residual generic work must already be explicit in the emitted work plan before
+  execution begins,</li>
+<li>typed work that is not admitted to this executor must remain typed in the
+  shared lane plan; it must not be relabeled as true residual by collective
+  code,</li>
+<li>Phase 1 implementation may start with zero-residual-only eligibility,</li>
+<li>but default graduation for shared-FS <code>AUTO</code> requires explicit mixed
+  collective-plus-generic execution with preplanned residual coverage.</li>
+</ul>
+<h2 id="5-source-ownership-model">5. Source ownership model<a class="headerlink" href="#5-source-ownership-model" title="Permanent link">&para;</a></h2>
+<p>The ownership concept should remain file-oriented by default because that is the
+best match for:</p>
+<ul>
+<li>current safetensors shard structure,</li>
+<li>shared-filesystem cold start locality,</li>
+<li>and the current benchmark results.</li>
+</ul>
+<p>But ownership must be used as a scheduling hint, not as a requirement to preload
+entire owner files.</p>
+<p>Normative rule:</p>
+<ul>
+<li>owner-file assignment determines which rank is responsible for first reading a
+  source span,</li>
+<li>it does not imply that all bytes from that file must become resident in GPU
+  memory at once.</li>
+</ul>
+<p>Default ownership should be file-oriented, but it must be weighted by selected
+bytes, not assigned by raw file index round-robin alone.</p>
+<p>Normative implementation rules:</p>
+<ul>
+<li>ownership should be computed from the current request's selected source spans,</li>
+<li>planner policy should cap owner skew with an explicit threshold,</li>
+<li>hot files may be split into source segments when file-level ownership would
+  violate that threshold,</li>
+<li>the planner must be able to reject owner-file collective if the resulting skew
+  is still too high.</li>
+</ul>
+<p>Future extensions may refine ownership from file-level to source-segment-level,
+but this design does not require that on day one.</p>
+<p>Normative implementation note:</p>
+<ul>
+<li>owner-file state should be batch-local and short-lived,</li>
+<li>it should not become long-lived GPU residency comparable to the current
+  <code>owned_payload</code> field in <code>collective_disk_loader.cc</code>,</li>
+<li>its lifetime should be closer to the current batch/file-buffer lifetime in:</li>
+<li><code>/opt/fastsafetensors/fastsafetensors/loader.py</code></li>
+<li><code>/opt/fastsafetensors/fastsafetensors/file_buffer.py</code></li>
+</ul>
+<h1 id="relation-to-existing-executors">Relation To Existing Executors<a class="headerlink" href="#relation-to-existing-executors" title="Permanent link">&para;</a></h1>
+<h2 id="1-relation-to-tensorbatchedlocalexecutor">1. Relation to <code>TensorBatchedLocalExecutor</code><a class="headerlink" href="#1-relation-to-tensorbatchedlocalexecutor" title="Permanent link">&para;</a></h2>
+<p><code>TensorBatchedLocalExecutor</code> remains useful and should stay.</p>
+<p>It is still the best common path for:</p>
+<ul>
+<li>host-local SSD,</li>
+<li>single-rank loads,</li>
+<li>and workloads where cross-rank dedup is not worth the coordination cost.</li>
+</ul>
+<p>The new owner-file batched collective executor is not meant to replace local
+batched execution globally.</p>
+<p>Instead:</p>
+<ul>
+<li>host-local ordinary disk startup should continue to bias toward local batched,</li>
+<li>shared-FS TP cold start should gain a better collective executor than the
+  current eager collective path.</li>
+</ul>
+<h2 id="2-relation-to-current-collective_disk_load">2. Relation to current <code>collective_disk_load</code><a class="headerlink" href="#2-relation-to-current-collective_disk_load" title="Permanent link">&para;</a></h2>
+<p>The current eager collective path should become legacy or internal fallback for
+the subset of cases where:</p>
+<ul>
+<li>metadata is incomplete,</li>
+<li>batched owner-file planning is not possible,</li>
+<li>or rollout explicitly prefers the old behavior during migration.</li>
+</ul>
+<p>Long-term, the current coarse root-first collective path should no longer be the
+default strategy for shared-FS TP startup.</p>
+<p>Hard-cut rule:</p>
+<ul>
+<li>once the new executor is proven for its intended workload family, temporary
+  migration fallbacks and prototype-only preload shapes should be deleted or
+  isolated away from the steady-state hot path rather than preserved as equal
+  citizens.</li>
+</ul>
+<p>This relation is still limited to materialization strategy.</p>
+<ul>
+<li>It does not imply that owner-file collective owns future cross-topology
+  representation transforms.</li>
+<li>It only says owner-file collective is the preferred shared-FS execution
+  strategy when the semantic core has already been resolved.</li>
+</ul>
+<h2 id="3-relation-to-current-eager-owner-file-path">3. Relation to current eager owner-file path<a class="headerlink" href="#3-relation-to-current-eager-owner-file-path" title="Permanent link">&para;</a></h2>
+<p>The current eager owner-file collective path is a useful prototype but should be
+retired after migration.</p>
+<p>Its two key ideas survive:</p>
+<ul>
+<li>owner-file source ownership,</li>
+<li>peer distribution from owner rank.</li>
+</ul>
+<p>Its eager memory behavior does not survive:</p>
+<ul>
+<li>no whole-owner-payload VRAM preload,</li>
+<li>no second full copy of large file ownership on GPU.</li>
+</ul>
+<h2 id="4-closure-status-2026-04-27">4. Closure status (2026-04-27)<a class="headerlink" href="#4-closure-status-2026-04-27" title="Permanent link">&para;</a></h2>
+<p>The current mounted TP8 closure packet is
+<code>docs/benchmarks/20260427-example-tp-model-fp8-mounted-tp8-cold-start-evidence.md</code>.</p>
+<p>That packet freezes the <code>0109</code> policy conclusion:</p>
+<ul>
+<li><code>owner_file_collective_shared_fs_only=true</code> is the intended steady-state
+  policy, not temporary rollout debt;</li>
+<li><code>owner_file_collective_allow_mixed_residual=false</code> is the intended
+  fail-closed steady-state policy, not a provisional blocker waiting to be
+  relaxed;</li>
+<li>current TP8 startup still reaches
+  <code>dominant_executor=OwnerFileCollectiveExecutor</code> with
+  <code>actual_generic_backend_bytes=0</code>, so the mounted case does not justify
+  widening mixed residual merely to keep startup alive; and</li>
+<li>the remaining open item is performance quality in the TensorCast bootstrap
+  runtime, not policy ambiguity in <code>0109</code>.</li>
+</ul>
+<h1 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h1>
+<p>This design should not add new environment-only toggles.</p>
+<p>Typed daemon rollout should remain under:</p>
+<ul>
+<li><code>engine.materialization_strategy</code></li>
+</ul>
+<p>The converged repository already has the relevant typed fields:</p>
+<ul>
+<li><code>enable_owner_file_collective</code></li>
+<li><code>owner_file_collective_peak_bytes_budget</code></li>
+<li><code>owner_file_collective_batch_bytes</code></li>
+<li><code>owner_file_collective_dim1_staging_bytes</code></li>
+<li><code>owner_file_collective_max_inflight_batches</code></li>
+<li><code>owner_file_collective_shared_fs_only</code></li>
+<li><code>owner_file_collective_max_owner_skew_ratio</code></li>
+<li><code>owner_file_collective_min_dedup_saving_bytes</code></li>
+<li><code>owner_file_collective_group_assemble_timeout</code></li>
+<li><code>owner_file_collective_allow_mixed_residual</code></li>
+<li><code>owner_file_collective_planner_cache_entries</code></li>
+</ul>
+<p>These are the actual field names under the current
+<code>proto/tensorcast/config/v1/daemon_config.proto</code> and
+<code>StoreEngineOptions::MaterializationStrategyConfig</code>. <code>0109</code> should consume
+these landed controls rather than introducing a second naming family.</p>
+<p>Normative rules:</p>
+<ul>
+<li>rollout must be typed and config-backed,</li>
+<li>env variables may still exist for diagnosis but not as the primary
+  configuration mechanism,</li>
+<li>executor preference remains a policy choice and must not alter semantic truth,</li>
+<li>budget and threshold fields are required for default routing; boolean enable
+  flags alone are not sufficient.</li>
+</ul>
+<h1 id="correctness-model">Correctness Model<a class="headerlink" href="#correctness-model" title="Permanent link">&para;</a></h1>
+<p>The executor must preserve the same correctness guarantees as current common
+materialization.</p>
+<h2 id="1-no-semantic-widening">1. No semantic widening<a class="headerlink" href="#1-no-semantic-widening" title="Permanent link">&para;</a></h2>
+<p>The executor may batch and reorder for source locality, but it may not widen
+the requested semantic result.</p>
+<p>In particular:</p>
+<ul>
+<li>owner batches must read only spans required by the resolved selection, except
+  for explicit staging windows whose widened source bytes are accounted for as
+  executor-private amplification,</li>
+<li>output bytes must still match the resolved target layout exactly,</li>
+<li>residual ranges must remain visible and correctly accounted for.</li>
+</ul>
+<h2 id="2-ownership-is-not-permission-to-alias-semantics">2. Ownership is not permission to alias semantics<a class="headerlink" href="#2-ownership-is-not-permission-to-alias-semantics" title="Permanent link">&para;</a></h2>
+<p>Owner-file execution must not change:</p>
+<ul>
+<li><code>artifact_id</code></li>
+<li><code>view_id</code></li>
+<li><code>selection_hash</code></li>
+<li><code>logical_layout_hash</code></li>
+<li>target coverage</li>
+</ul>
+<p>It is only a transport and execution optimization.</p>
+<h2 id="3-release-after-commit">3. Release-after-commit<a class="headerlink" href="#3-release-after-commit" title="Permanent link">&para;</a></h2>
+<p>Temporary owner staging must be freed after the batch is committed and before
+the next batch requires that memory.</p>
+<p>This is both:</p>
+<ul>
+<li>a memory-safety rule,</li>
+<li>and a correctness rule against accidental stale aliasing.</li>
+</ul>
+<h2 id="4-atomic-batch-commit-and-failure-handling">4. Atomic batch commit and failure handling<a class="headerlink" href="#4-atomic-batch-commit-and-failure-handling" title="Permanent link">&para;</a></h2>
+<p>Each batch is a commit unit for this executor.</p>
+<p>Normative rules:</p>
+<ul>
+<li>a batch is committed only after all destination bytes covered by that batch
+  are visible and semantically complete,</li>
+<li>owner-local direct writes, peer sends, and staged pack results belong to the
+  same commit unit,</li>
+<li>if any part of the batch fails, the batch is reported as uncommitted and must
+  follow explicit retry, poison, or fallback policy from the strategy plane,</li>
+<li><code>ExecutionCommitReport</code> must be able to account for committed and uncommitted
+  batch coverage without inventing residual work after the fact.</li>
+</ul>
+<h1 id="naming-compliance">Naming Compliance<a class="headerlink" href="#naming-compliance" title="Permanent link">&para;</a></h1>
+<table>
+<thead>
+<tr>
+<th>Proposed symbol</th>
+<th>Kind</th>
+<th>Required style</th>
+<th>Result</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>OwnerFileBatchedCollectiveExecutor</code></td>
+<td>C++ class</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>OwnerBatchPlan</code></td>
+<td>C++ struct</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>OwnerBatchOp</code></td>
+<td>C++ variant/struct family</td>
+<td><code>PascalCase</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>build_owner_batch_plan</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>estimate_owner_collective_cost</code></td>
+<td>C++ function</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+<tr>
+<td><code>owner_file_collective_peak_bytes_budget</code></td>
+<td>config field</td>
+<td><code>snake_case</code></td>
+<td>pass</td>
+</tr>
+</tbody>
+</table>
+<h1 id="why-this-is-more-consistent-than-reusing-fastsafetensors-directly">Why This Is More Consistent Than Reusing <code>fastsafetensors</code> Directly<a class="headerlink" href="#why-this-is-more-consistent-than-reusing-fastsafetensors-directly" title="Permanent link">&para;</a></h1>
+<p>Directly embedding a <code>fastsafetensors</code>-style loader into vLLM or into the SDK
+surface would be inconsistent with TensorCast because it would bypass:</p>
+<ul>
+<li><code>ArtifactSelection</code></li>
+<li><code>view_id</code></li>
+<li>strategy-plane lowering</li>
+<li>residual byte accounting</li>
+<li>target-layout-aware mixed execution</li>
+</ul>
+<p>By contrast, this design uses <code>fastsafetensors</code> as an implementation reference
+for:</p>
+<ul>
+<li>bounded batching,</li>
+<li>owner-source dedup,</li>
+<li>release-after-use memory behavior,</li>
+<li>GPU-side peer distribution.</li>
+</ul>
+<p>Those ideas are then re-expressed as a TensorCast executor under the common
+runtime.</p>
+<p>That is the consistent form for this project.</p>
+<p>Practical reference points:</p>
+<ul>
+<li>batch orchestration:</li>
+<li><code>/opt/fastsafetensors/fastsafetensors/loader.py</code></li>
+<li>current batch lifetime and release behavior:</li>
+<li><code>/opt/fastsafetensors/fastsafetensors/file_buffer.py</code></li>
+<li>owner-rank collective distribution behavior:</li>
+<li><code>/opt/fastsafetensors/fastsafetensors/tensor_factory.py</code></li>
+<li>higher-level architecture rationale:</li>
+<li><code>/opt/fastsafetensors/docs/architecture.md</code></li>
+<li><code>/opt/fastsafetensors/docs/safetensors-load-optimization.md</code></li>
+</ul>
+<h1 id="rollout-plan">Rollout Plan<a class="headerlink" href="#rollout-plan" title="Permanent link">&para;</a></h1>
+<h2 id="phase-0-pre-109-convergence-dependency">Phase 0: Pre-109 convergence dependency<a class="headerlink" href="#phase-0-pre-109-convergence-dependency" title="Permanent link">&para;</a></h2>
+<ul>
+<li>completed:</li>
+<li>the runtime-critical request-normalization work from
+    <code>docs/designs/0107-retrieval-policy-plane-cleanup.md</code>,</li>
+<li>the strategy-plane convergence work folded back into
+    <code>docs/designs/0108-tensor-aware-materialization-strategy-plane.md</code>,</li>
+<li>especially ordinary replica convergence, execution-environment facts, typed
+    strategy budgets, and prototype cleanup seams.</li>
+</ul>
+<h2 id="phase-1-add-the-executor-beside-existing-paths">Phase 1: Add the executor beside existing paths<a class="headerlink" href="#phase-1-add-the-executor-beside-existing-paths" title="Permanent link">&para;</a></h2>
+<ul>
+<li>implement <code>OwnerFileBatchedCollectiveExecutor</code> behind typed config,</li>
+<li>keep current local-batched and generic fallback unchanged,</li>
+<li>keep current eager collective available only as a lower-priority fallback.</li>
+<li>require explicit shared-source proof for initial routing; do not let
+  <code>source_locality=AUTO</code> silently behave as “shared filesystem”.</li>
+</ul>
+<h2 id="phase-2-route-explicit-shared-fs-tp-experiments-into-it">Phase 2: Route explicit shared-FS TP experiments into it<a class="headerlink" href="#phase-2-route-explicit-shared-fs-tp-experiments-into-it" title="Permanent link">&para;</a></h2>
+<ul>
+<li>ordinary disk startup on shared filesystems may choose the new executor when:</li>
+<li>source metadata is complete,</li>
+<li>tensor-aware planning covers the bulk of bytes,</li>
+<li>estimated owner peak bytes fit the configured budget,</li>
+<li>owner skew and dedup thresholds pass policy.</li>
+</ul>
+<h2 id="phase-3-make-it-the-default-collective-executor-for-shared-fs-tp-startup">Phase 3: Make it the default collective executor for shared-FS TP startup<a class="headerlink" href="#phase-3-make-it-the-default-collective-executor-for-shared-fs-tp-startup" title="Permanent link">&para;</a></h2>
+<ul>
+<li>once explicit mixed residual handling, cost-model routing, and observability
+  are proven,</li>
+<li>make this executor the default collective choice for eligible shared-FS,
+  same-host TP cold starts.</li>
+</ul>
+<h2 id="phase-4-retire-eager-owner-file-preload">Phase 4: Retire eager owner-file preload<a class="headerlink" href="#phase-4-retire-eager-owner-file-preload" title="Permanent link">&para;</a></h2>
+<ul>
+<li>once correctness and performance are proven,</li>
+<li>delete or demote the current eager <code>owned_payload</code> collective path.</li>
+</ul>
+<h1 id="validation-plan">Validation Plan<a class="headerlink" href="#validation-plan" title="Permanent link">&para;</a></h1>
+<p>This design must be validated with both correctness and performance evidence.</p>
+<h2 id="1-correctness">1. Correctness<a class="headerlink" href="#1-correctness" title="Permanent link">&para;</a></h2>
+<ul>
+<li>exact subset tensor digest compare against:</li>
+<li>TensorCast local-batched,</li>
+<li><code>fastsafetensors</code>,</li>
+<li>and reference <code>auto</code> startup where applicable</li>
+<li>TP=8 <code>vllm serve</code> startup and <code>/v1/completions</code> correctness</li>
+<li>mixed workloads including:</li>
+<li>replicated</li>
+<li>dim0</li>
+<li>dim1</li>
+<li>concat / residual fallback</li>
+</ul>
+<h2 id="2-peak-memory">2. Peak memory<a class="headerlink" href="#2-peak-memory" title="Permanent link">&para;</a></h2>
+<ul>
+<li>record per-rank temporary owner bytes</li>
+<li>prove that peak extra owner staging stays within configured budget</li>
+<li>show that current owner-file OOM cases no longer OOM</li>
+</ul>
+<h2 id="3-planner-and-routing-evidence">3. Planner and routing evidence<a class="headerlink" href="#3-planner-and-routing-evidence" title="Permanent link">&para;</a></h2>
+<ul>
+<li>record planner overhead and cache-hit behavior</li>
+<li>record estimated versus actual owner skew</li>
+<li>record executor selection reasons for chosen and rejected candidates</li>
+<li>validate group-assemble timeout and fail-open behavior under partial rank join</li>
+</ul>
+<h2 id="4-performance">4. Performance<a class="headerlink" href="#4-performance" title="Permanent link">&para;</a></h2>
+<p>Required comparisons:</p>
+<ul>
+<li>shared filesystem cold start:</li>
+<li>current collective</li>
+<li>current local-batched</li>
+<li>new owner-file batched collective</li>
+<li><code>fastsafetensors</code></li>
+<li>host-local SSD:</li>
+<li>ensure no regression relative to local-batched default</li>
+<li>exact benchmark subsets:</li>
+<li>exact <code>879</code> source-tensor subset</li>
+<li>exact <code>614</code> sliced subset</li>
+<li>large dim0 and dim1 focused subsets</li>
+</ul>
+<p>Primary success criteria:</p>
+<ul>
+<li>shared-FS TP cold-start wall time matches or beats <code>fastsafetensors</code></li>
+<li>no OOM on the current Example TP Model TP=8 workload</li>
+<li>shared-FS eligible requests choose this executor by default once rollout is
+  enabled</li>
+<li>host-local default path remains no worse than current best local-batched path</li>
+</ul>
+<h1 id="expected-outcome">Expected Outcome<a class="headerlink" href="#expected-outcome" title="Permanent link">&para;</a></h1>
+<p>If implemented correctly, this design should deliver:</p>
+<ul>
+<li>the memory safety lessons of <code>fastsafetensors</code>,</li>
+<li>the semantic rigor of TensorCast's selection-first architecture,</li>
+<li>a practical replacement for the current eager owner-file collective path,</li>
+<li>and a shared-filesystem TP startup path that is at least competitive with
+  <code>fastsafetensors</code>, with room to surpass it by using direct final-layout writes
+  and mixed execution.</li>
+</ul>
+<p>In short:</p>
+<ul>
+<li><code>fastsafetensors</code> shows the right memory behavior,</li>
+<li>TensorCast already has the richer semantic model,</li>
+<li>this design combines the two in a form that matches TensorCast's long-term
+  architecture.</li>
+</ul>
+<h1 id="references">References<a class="headerlink" href="#references" title="Permanent link">&para;</a></h1>
+<ul>
+<li><a href="./docs/designs/0107-retrieval-policy-plane-cleanup.md"><code>docs/designs/0107-retrieval-policy-plane-cleanup.md</code></a></li>
+<li><a href="./docs/designs/0108-tensor-aware-materialization-strategy-plane.md"><code>docs/designs/0108-tensor-aware-materialization-strategy-plane.md</code></a></li>
+<li><a href="./docs/designs/0112-binding-native-serving-realization-and-publication.md"><code>docs/designs/0112-binding-native-serving-realization-and-publication.md</code></a></li>
+<li><a href="./docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md"><code>docs/benchmarks/20260415-qwen2.5-32b-mounted-collective-first-v4-serving-evidence.md</code></a></li>
+<li><a href="./docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md"><code>docs/benchmarks/20260118-qwen2.5-32b-safetensors-loading-strategies.md</code></a></li>
+<li><a href="./docs/internals/disk-load-strategy.md"><code>docs/internals/disk-load-strategy.md</code></a></li>
+<li><a href="./core/store/replica/collective_disk_loader.cc"><code>core/store/replica/collective_disk_loader.cc</code></a></li>
+</ul>
+
+
+
+
+
+
+
+  
+  
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      Copyright &copy; 2025-2026 TensorCast Team
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+      
+      
+    
+    <a href="https://github.com/tensorcast-ai/tensorcast" target="_blank" rel="noopener" title="github.com" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "content.code.copy", "content.code.annotate", "search.suggest", "search.highlight"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
