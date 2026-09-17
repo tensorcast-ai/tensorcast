@@ -37,7 +37,7 @@ DEFAULT_TORCH="2.11.0"
 #   TENSORCAST_CUDA=cu130 tools/release.sh build
 # or pass --cuda-version explicitly. Default stays cu128 for backwards compat.
 DEFAULT_CUDA="${TENSORCAST_CUDA:-cu128}"
-DOCKER_IMAGE="${TENSORCAST_RELEASE_IMAGE:-quay.io/pypa/manylinux_2_28_x86_64}"
+DOCKER_IMAGE="${TENSORCAST_RELEASE_IMAGE:-tensorcast-builder:cu130}"
 
 usage() {
     cat <<EOF
@@ -59,13 +59,15 @@ build OPTIONS
   --torch-version X.Y.Z   Pin torch version            (default ${DEFAULT_TORCH})
   --cuda-version  cuNNN   Pin CUDA index               (default ${DEFAULT_CUDA})
   --pypi                  Emit a clean version string  (RELEASE_PYPI=1)
-  --in-docker             Build inside ${DOCKER_IMAGE} for manylinux_2_28
+  --in-docker             Build torch 2.13.0 + cu130 inside ${DOCKER_IMAGE}
   --skip-uv-sync          Skip uv sync (CI / pre-prepared env)
   --cache-uv-lock         Cache resolved uv.lock under tools/uv-lock-cache/
 
 EXAMPLES
-  tools/release.sh build                          # Stage A, default matrix
-  tools/release.sh build --pypi                   # Stage A, clean version
+  tools/release.sh build --torch-version 2.13.0 --cuda-version cu130
+                                                  # Stage A, v0.1.1 matrix
+  tools/release.sh build --torch-version 2.13.0 --cuda-version cu130 --pypi
+                                                  # Stage A, clean version
   tools/release.sh build --in-docker --pypi       # Stage B, manylinux + clean
   tools/release.sh post-process dist/foo.whl
   tools/release.sh check
@@ -88,7 +90,7 @@ run_in_docker() {
         -w /io \
         "${extra_env[@]}" \
         "${DOCKER_IMAGE}" \
-        bash /io/tools/release.sh "$@"
+        bash /io/docker/build_in_docker.sh "$@"
 }
 
 ensure_uv() {
@@ -98,15 +100,15 @@ ensure_uv() {
     }
 }
 
-# Ensure the `release` dependency group (wheel / auditwheel / patchelf / twine)
-# is synced into .venv. These tools are not part of the default `uv sync`, so
-# any release-only entrypoint (post-process / check / publish) must call this
-# before invoking them.
+# Install only the `release` dependency group (wheel / auditwheel / patchelf /
+# twine) into the active environment. Do not use `uv sync` here: even with
+# --no-install-project it resolves the project build requirements, which can
+# pull the default torch/CUDA matrix after a matrix build restores pyproject.
 ensure_release_deps() {
     ensure_uv
     cd "${PROJECT_ROOT}"
-    echo "==> uv sync --group release --no-install-project"
-    uv sync --group release --no-install-project
+    echo "==> uv pip install --group release"
+    uv pip install --group release
 }
 
 # Filter dist/ for wheels eligible for PyPI upload (manylinux_*, not linux_*).
@@ -146,8 +148,9 @@ cmd_build() {
     done
 
     if [[ ${in_docker_flag} -eq 1 && -z "${IN_DOCKER:-}" ]]; then
-        # Re-launch self in docker. Drop --in-docker; pass the rest through.
-        local rebuilt=("build")
+        # Re-launch through the Docker wrapper. It pins the release matrix and
+        # swaps in the manylinux-specific Bazel configuration.
+        local rebuilt=()
         [[ "${torch_version}" != "${DEFAULT_TORCH}" ]] && rebuilt+=("--torch-version" "${torch_version}")
         [[ "${cuda_version}" != "${DEFAULT_CUDA}" ]]  && rebuilt+=("--cuda-version" "${cuda_version}")
         [[ ${pypi} -eq 1 ]]          && rebuilt+=("--pypi")
@@ -198,7 +201,7 @@ cmd_build() {
     if [[ ${need_patch_torch} -eq 1 || ${need_patch_cuda} -eq 1 ]]; then
         cp pyproject.toml pyproject.toml.bak
         restore_pyproject=1
-        trap '[[ ${restore_pyproject} -eq 1 ]] && mv pyproject.toml.bak pyproject.toml' EXIT
+        trap 'if [[ -f "${PROJECT_ROOT}/pyproject.toml.bak" ]]; then mv "${PROJECT_ROOT}/pyproject.toml.bak" "${PROJECT_ROOT}/pyproject.toml"; fi' EXIT
     fi
 
     if [[ ${need_patch_torch} -eq 1 ]]; then
@@ -279,6 +282,7 @@ sys.exit(0 if ok else 1)
         mv pyproject.toml.bak pyproject.toml
         restore_pyproject=0
     fi
+    trap - EXIT
 
     echo
     echo "==> Built wheel(s):"
@@ -305,7 +309,7 @@ sys.exit(0 if ok else 1)
         esac
         echo
         echo "==> Post-processing ${whl}"
-        uv run python "${SCRIPT_DIR}/wheel_post_process.py" "${whl}"
+        uv run --no-project python "${SCRIPT_DIR}/wheel_post_process.py" "${whl}"
     done
 }
 
@@ -348,7 +352,7 @@ cmd_publish() {
     echo "${wheels}"
     echo
     echo "WARNING: PyPI does not allow re-uploading the same version."
-    read -r -p "Type the project version to confirm (e.g. 0.1.0): " confirm_version
+    read -r -p "Type the project version to confirm (e.g. 0.1.1): " confirm_version
     local actual_version
     actual_version="$(cat "${PROJECT_ROOT}/version.txt")"
     if [[ "${confirm_version}" != "${actual_version}" ]]; then

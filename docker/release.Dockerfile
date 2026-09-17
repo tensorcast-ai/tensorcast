@@ -1,12 +1,12 @@
 # TensorCast manylinux wheel builder (Stage B – PyPI uploadable)
 #
-# Base image   : pytorch/manylinux2_28-builder:cuda12.8
+# Base image   : pytorch/manylinux2_28-builder:cuda13.0
 # Purpose      : Produce a manylinux_2_28_x86_64 wheel that is eligible
 #                for upload to PyPI.
 #
 # The pytorch/manylinux2_28-builder image already contains:
 #   - glibc 2.28 (manylinux_2_28 compliance)
-#   - CUDA 12.8 toolkit (nvcc, headers, libraries)
+#   - CUDA 13.0 toolkit (nvcc, headers, libraries)
 #   - gcc-toolset / devtoolset toolchain
 #   - Python interpreters (cp310-cp310, cp311-cp311, cp312-cp312)
 #
@@ -19,7 +19,7 @@
 # ------------------------------------------------------------------------------
 # Build
 # ------------------------------------------------------------------------------
-#   docker build -f docker/release.Dockerfile -t tensorcast-builder:latest .
+#   docker build -f docker/release.Dockerfile -t tensorcast-builder:cu130 .
 #
 # ------------------------------------------------------------------------------
 # Run (non-interactive build)
@@ -28,9 +28,8 @@
 #     -v $(pwd):/io \
 #     -w /io \
 #     -e IN_DOCKER=1 \
-#     -e UV_PROJECT_ENVIRONMENT=/io/.venv-manylinux \
-#     tensorcast-builder:latest \
-#     bash tools/release.sh build --pypi --skip-uv-sync
+#     tensorcast-builder:cu130 \
+#     bash docker/build_in_docker.sh --pypi
 #
 # ------------------------------------------------------------------------------
 # Run (interactive shell for debugging)
@@ -39,12 +38,12 @@
 #     -v $(pwd):/io \
 #     -w /io \
 #     -e IN_DOCKER=1 \
-#     tensorcast-builder:latest \
+#     tensorcast-builder:cu130 \
 #     bash
 #
 # ------------------------------------------------------------------------------
 
-FROM pytorch/manylinux2_28-builder:cuda12.8
+FROM pytorch/manylinux2_28-builder:cuda13.0
 
 LABEL maintainer="TensorCast Team" \
       description="Manylinux builder for TensorCast PyPI wheel"
@@ -63,6 +62,15 @@ RUN yum install -y git curl unzip wget
 # We add it to PATH for all subsequent layers.
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
+
+# release.sh invokes Python before the project-level `uv sync`. Keep a small,
+# image-local bootstrap environment so those commands can import toml, then let
+# `uv sync` populate the same environment with torch 2.13.0 + cu130.
+ENV UV_PROJECT_ENVIRONMENT="/opt/tensorcast-release-cu130"
+RUN uv venv --python /opt/python/cp310-cp310/bin/python "${UV_PROJECT_ENVIRONMENT}" && \
+    uv pip install --python "${UV_PROJECT_ENVIRONMENT}/bin/python" "toml>=0.10.2"
+ENV VIRTUAL_ENV="${UV_PROJECT_ENVIRONMENT}"
+ENV PATH="${UV_PROJECT_ENVIRONMENT}/bin:${PATH}"
 
 # ------------------------------------------------------------------------------
 # 3. Bazel (via bazelisk)

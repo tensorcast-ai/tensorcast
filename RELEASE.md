@@ -4,13 +4,13 @@ Step-by-step procedure for cutting a tensorcast release to PyPI.
 
 ---
 
-## 1. Release Matrix (v0.1.0)
+## 1. Release Matrix (v0.1.1)
 
 | Axis | Value |
 |---|---|
-| tensorcast version | `0.1.0` |
-| torch | `2.11.0` |
-| CUDA | `12.8` (PyTorch index `cu128`) |
+| tensorcast version | `0.1.1` |
+| torch | `2.13.0` |
+| CUDA | `13.0` (PyTorch index `cu130`) |
 | Python | 3.10 / 3.11 / 3.12 |
 | Platform | `manylinux_2_28_x86_64` (glibc ≥ 2.28) |
 | OS | Linux only (kernel ≥ 5.10) |
@@ -25,7 +25,8 @@ Two-stage pipeline:
 - **Stage B** — manylinux docker build, `manylinux_2_28_x86_64` tag. **Only wheel allowed on PyPI.**
 
 ```
-Stage A: tools/release.sh build           (local, linux_x86_64)
+Stage A: tools/release.sh build --torch-version 2.13.0 --cuda-version cu130
+                                             (local, linux_x86_64)
    │
    ▼  packaging logic verified, smoke tests PASS
 Stage B: tools/release.sh build --in-docker --pypi   (docker, manylinux_2_28)
@@ -39,8 +40,8 @@ Stage B: tools/release.sh build --in-docker --pypi   (docker, manylinux_2_28)
 ### 2.1 Stage A — Local Validation
 
 ```bash
-tools/release.sh build
-# → dist/tensorcast-0.1.0+torch211.cu128-cp310-cp310-linux_x86_64.whl
+tools/release.sh build --torch-version 2.13.0 --cuda-version cu130
+# → dist/tensorcast-0.1.1+torch213.cu130-cp310-cp310-linux_x86_64.whl
 ```
 
 Install into a clean venv and run smoke tests in §4.
@@ -48,24 +49,24 @@ Install into a clean venv and run smoke tests in §4.
 To preview the PyPI version string locally:
 
 ```bash
-tools/release.sh build --pypi
-# → dist/tensorcast-0.1.0-cp310-cp310-linux_x86_64.whl
+tools/release.sh build --torch-version 2.13.0 --cuda-version cu130 --pypi
+# → dist/tensorcast-0.1.1-cp310-cp310-linux_x86_64.whl
 ```
 
 ### 2.2 Stage B — Manylinux Wheel for PyPI
 
 ```bash
 # Build the Docker image once
-docker build -f docker/release.Dockerfile -t tensorcast-builder:latest .
+docker build -f docker/release.Dockerfile -t tensorcast-builder:cu130 .
 
 # Run the build inside the container
 docker run --rm \
   -v $(pwd):/io \
   -w /io \
   -e IN_DOCKER=1 \
-  tensorcast-builder:latest \
+  tensorcast-builder:cu130 \
   bash docker/build_in_docker.sh --pypi
-# → dist/tensorcast-0.1.0-cp310-cp310-manylinux_2_28_x86_64.whl
+# → dist/tensorcast-0.1.1-cp310-cp310-manylinux_2_28_x86_64.whl
 ```
 
 `auditwheel repair` runs automatically inside the container, producing the
@@ -75,8 +76,8 @@ docker run --rm \
 
 ```bash
 tools/release.sh check                                          # twine check
-unzip -l dist/tensorcast-0.1.0-*manylinux*.whl | grep -E 'libtorch|libcuda|libcudnn'  # must be empty
-du -h dist/tensorcast-0.1.0-*manylinux*.whl                   # < 200 MB
+unzip -l dist/tensorcast-0.1.1-*manylinux*.whl | grep -E 'libtorch|libcuda|libcudnn'  # must be empty
+du -h dist/tensorcast-0.1.1-*manylinux*.whl                   # < 200 MB
 ```
 
 ### 2.4 TestPyPI Dry-run
@@ -89,15 +90,15 @@ Verify in a clean venv:
 
 ```bash
 python -m venv /tmp/tc && source /tmp/tc/bin/activate
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
 pip install --index-url https://test.pypi.org/simple/ \
             --extra-index-url https://pypi.org/simple/ \
-            tensorcast==0.1.0
+            tensorcast==0.1.1
 python -c "import tensorcast; print(tensorcast.__version__)"
 tensorcast-cli daemon start --help
 ```
 
-If anything fails, fix and bump to `0.1.0.post1` — TestPyPI rejects re-uploading
+If anything fails, fix and bump to `0.1.1.post1` — TestPyPI rejects re-uploading
 the same version.
 
 ### 2.5 Production PyPI
@@ -109,8 +110,8 @@ tools/release.sh publish
 Then:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 Create the GitHub Release at <https://github.com/tensorcast-ai/tensorcast/releases/new>;
@@ -124,9 +125,9 @@ Three version strings are produced by `setup.py`, controlled by env vars:
 
 | Mode | Trigger | Version string | Use |
 |---|---|---|---|
-| Dev | default | `0.1.0.dev0+<gitsha>.torch211.cu128` | local iterative builds |
-| Internal release | `RELEASE=1` | `0.1.0+torch211.cu128` | internal matrix wheels |
-| PyPI release | `RELEASE_PYPI=1` (set by `--pypi`) | `0.1.0` | PyPI upload |
+| Dev | default | `0.1.1.dev0+<gitsha>.torch211.cu128` | local iterative builds |
+| Internal release | `RELEASE=1` with v0.1.1 matrix | `0.1.1+torch213.cu130` | internal matrix wheels |
+| PyPI release | `RELEASE_PYPI=1` (set by `--pypi`) | `0.1.1` | PyPI upload |
 
 `version.txt` is the source of truth. Bump it when starting a new release cycle.
 
@@ -140,8 +141,8 @@ Run these after Stage A or Stage B to verify the wheel is healthy.
 
 ```bash
 python -m venv /tmp/tc && source /tmp/tc/bin/activate
-pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128
-pip install dist/tensorcast-0.1.0-*.whl
+pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
+pip install dist/tensorcast-0.1.1-*.whl
 
 # Import + version
 python -c "import tensorcast; print(tensorcast.__version__)"
@@ -185,13 +186,13 @@ print('All imports OK')
 
 ```bash
 # No torch/CUDA libraries bundled
-unzip -l dist/tensorcast-0.1.0-*.whl | grep -E 'libtorch|libcuda|libcudnn' || echo "PASS: no bundled CUDA/torch libs"
+unzip -l dist/tensorcast-0.1.1-*.whl | grep -E 'libtorch|libcuda|libcudnn' || echo "PASS: no bundled CUDA/torch libs"
 
 # Daemon is present and executable
-unzip -l dist/tensorcast-0.1.0-*.whl | grep tensorcast_daemon
+unzip -l dist/tensorcast-0.1.1-*.whl | grep tensorcast_daemon
 
 # Configs are present
-unzip -l dist/tensorcast-0.1.0-*.whl | grep 'examples/config.*\.yaml'
+unzip -l dist/tensorcast-0.1.1-*.whl | grep 'examples/config.*\.yaml'
 ```
 
 ---
@@ -203,7 +204,7 @@ Users who need a different torch version must build locally:
 ```bash
 git clone https://github.com/tensorcast-ai/tensorcast.git
 cd tensorcast
-tools/release.sh build --torch-version 2.13.0 --cuda-version cu128
+tools/release.sh build --torch-version 2.13.0 --cuda-version cu130
 pip install dist/tensorcast-*.whl
 ```
 

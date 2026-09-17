@@ -8,14 +8,51 @@
 # Usage (inside container):
 #   bash docker/build_in_docker.sh [args...]
 #
-# Typical args are forwarded to tools/release.sh, e.g.:
-#   bash docker/build_in_docker.sh --pypi --skip-uv-sync
+# This image builds the v0.1.1 release matrix: torch 2.13.0 + cu130.
+# Other build flags are forwarded to tools/release.sh, e.g.:
+#   bash docker/build_in_docker.sh --pypi
 #
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly TORCH_VERSION="2.13.0"
+readonly CUDA_VERSION="cu130"
+
+release_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --torch-version)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --torch-version requires a value" >&2
+                exit 2
+            fi
+            if [[ "$2" != "${TORCH_VERSION}" ]]; then
+                echo "error: Docker release builds require torch ${TORCH_VERSION}" >&2
+                exit 2
+            fi
+            shift 2
+            ;;
+        --cuda-version)
+            if [[ $# -lt 2 ]]; then
+                echo "error: --cuda-version requires a value" >&2
+                exit 2
+            fi
+            if [[ "$2" != "${CUDA_VERSION}" ]]; then
+                echo "error: Docker release builds require CUDA ${CUDA_VERSION}" >&2
+                exit 2
+            fi
+            shift 2
+            ;;
+        *)
+            release_args+=("$1")
+            shift
+            ;;
+    esac
+done
+release_args+=("--torch-version" "${TORCH_VERSION}" "--cuda-version" "${CUDA_VERSION}")
+
 cd "${PROJECT_ROOT}"
 
 # ---------------------------------------------------------------------------
@@ -46,8 +83,9 @@ cp "${PROJECT_ROOT}/docker/.bazelrc.docker" "${PROJECT_ROOT}/.bazelrc"
 # 3. Run the build (via release.sh)
 # ---------------------------------------------------------------------------
 BUILD_OK=1
-echo "==> [docker build] Running: bash tools/release.sh build $@"
-if bash "${PROJECT_ROOT}/tools/release.sh" build "$@"; then
+echo "==> [docker build] Matrix: torch ${TORCH_VERSION}, CUDA ${CUDA_VERSION}"
+echo "==> [docker build] Running: bash tools/release.sh build ${release_args[*]}"
+if bash "${PROJECT_ROOT}/tools/release.sh" build "${release_args[@]}"; then
     BUILD_OK=0
 else
     BUILD_OK=$?
